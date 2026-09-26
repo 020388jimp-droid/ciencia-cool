@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CIENCIA COOL - Creator Studio</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Header / Barra Superior -->
+  <header class="studio-header">
+    <div class="brand-group">
+      <img src="assets/logo.jpg" alt="Logo" class="logo-orb" style="object-fit: cover; padding: 0;">
+      <div>
+        <h1 class="brand-title">CIENCIA COOL</h1>
+        <p class="brand-subtitle">Automation & Video Creator Studio</p>
+      </div>
+    </div>
+
+    <!-- Navegación por Pestañas -->
+    <nav class="studio-nav">
+      <button class="nav-btn active" data-tab="news-tab">📡 Noticias en Vivo</button>
+      <button class="nav-btn" data-tab="history-tab">📜 Historia & Efemérides</button>
+      <button class="nav-btn" data-tab="nasa-tab">🌌 NASA Cosmos</button>
+      <button class="nav-btn" data-tab="studio-tab">🎬 Estudio de Guiones</button>
+      <button class="nav-btn" data-tab="library-tab">📁 Biblioteca</button>
+      <button class="nav-btn" data-tab="videos-tab" style="background:linear-gradient(135deg,rgba(124,58,237,0.3),rgba(168,85,247,0.3)); border-color:rgba(168,85,247,0.5);">🚀 Mis Videos</button>
+    </nav>
+  </header>
+
+  <!-- Contenedor Principal -->
+  <main class="main-content">
+
+    <!-- 1. PESTAÑA: NOTICIAS EN VIVO -->
+    <section id="news-tab" class="tab-pane active">
+      <div class="section-header">
+        <div>
+          <h2>Noticias y Descubrimientos en Tiempo Real</h2>
+          <p>Explora las últimas noticias científicas de SINC, ESA, Google News, Microsiervos y Xataka.</p>
+        </div>
+        <button id="btn-refresh-news" class="btn btn-secondary">🔄 Actualizar Noticias</button>
+      </div>
+
+      <div class="filter-bar">
+        <button class="filter-chip active" data-category="all">Todas</button>
+        <button class="filter-chip" data-category="astronomia">🔭 Astronomía & Espacio</button>
+        <button class="filter-chip" data-category="ciencia">🔬 Ciencia & Física</button>
+        <button class="filter-chip" data-category="tecnologia">🤖 Tecnología & IA</button>
+      </div>
+
+      <div id="news-grid" class="cards-grid">
+        <div class="loading-spinner">Cargando noticias científicas en tiempo real...</div>
+      </div>
+    </section>
+
+    <!-- 2. PESTAÑA: HISTORIA Y EFEMÉRIDES -->
+    <section id="history-tab" class="tab-pane">
+      <div class="section-header">
+        <div>
+          <h2>Un Día Como Hoy en la Historia Científica</h2>
+          <p>Grandes hitos, misiones espaciales y nacimientos de científicos ordenados cronológicamente por día.</p>
+        </div>
+        <button id="btn-refresh-history" class="btn btn-secondary">🔄 Actualizar Efemérides</button>
+      </div>
+
+      <!-- Selector de fecha para programar videos diarios de cada día del mes -->
+      <div class="filter-bar" style="align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.8rem; background: rgba(0,0,0,0.25); padding: 0.8rem; border-radius: 12px; border: 1px solid var(--border-color); margin-bottom: 1.5rem;">
+        <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
+          <span style="font-weight: 700; color: var(--primary); font-size: 0.9rem;">📅 Explorar Día:</span>
+          <input type="date" id="history-date-picker" style="background: rgba(0,0,0,0.5); border: 1px solid var(--border-color); color: #fff; padding: 0.45rem 0.8rem; border-radius: 8px; font-family: inherit; font-size: 0.9rem;">
+          <button id="btn-today-history" class="filter-chip active">📍 Hoy</button>
+          <button id="btn-prev-day" class="filter-chip">◀ Día Anterior</button>
+          <button id="btn-next-day" class="filter-chip">Día Siguiente ▶</button>
+        </div>
+        <div id="history-current-label" style="color: var(--primary); font-size: 0.95rem; font-weight: 700;"></div>
+      </div>
+
+      <div id="history-grid" class="timeline-grid">
+        <div class="loading-spinner">Consultando acontecimientos históricos...</div>
+      </div>
+    </section>
+
+    <!-- 3. PESTAÑA: NASA COSMOS -->
+    <section id="nasa-tab" class="tab-pane">
+      <div class="section-header">
+        <div>
+          <h2>Explorador Espacial de la NASA</h2>
+          <p>Imagen y efeméride astronómica del día (APOD) y búsqueda en la biblioteca oficial de la NASA en 4K.</p>
+        </div>
+      </div>
+
+      <div id="apod-container" class="apod-hero">
+        <div class="loading-spinner">Cargando datos astronómicos de la NASA...</div>
+      </div>
+
+      <div class="nasa-search-box">
+        <h3>🔍 Buscar en la Galería Multimedia de la NASA</h3>
+        <div class="search-input-group">
+          <input type="text" id="nasa-search-input" placeholder="Ej. James Webb, Black hole, Mars Rover, Nebula...">
+          <button id="btn-search-nasa" class="btn btn-primary">Buscar Medios</button>
+        </div>
+        <div id="nasa-results-grid" class="cards-grid"></div>
+      </div>
+    </section>
+
+    <!-- 4. PESTAÑA: ESTUDIO DE GUIONES -->
+    <section id="studio-tab" class="tab-pane">
+      <div class="section-header">
+        <div>
+          <h2>Estudio de Creación de Guiones</h2>
+          <p>Genera con Inteligencia Artificial o edita guiones optimizados para videos verticales (9:16) con retención máxima.</p>
+        </div>
+      </div>
+
+      <div class="studio-layout">
+        <!-- Panel Izquierdo: Formulario de Creación Rápida -->
+        <div class="studio-sidebar">
+          <h3>⚡ Generar Nuevo Guion</h3>
+          <div class="form-group">
+            <label>Tema o Noticia:</label>
+            <textarea id="script-topic" rows="3" placeholder="Ej. El telescopio Roman supera 100 veces al Hubble o La misión Voyager 2..."></textarea>
+          </div>
+          <div class="form-group">
+            <label>Contexto o Datos Clave (Opcional):</label>
+            <textarea id="script-context" rows="3" placeholder="Pega aquí fragmentos de la noticia o notas históricas..."></textarea>
+          </div>
+          <div class="form-group">
+            <label>Formato del Video:</label>
+            <select id="script-format">
+              <option value="noticia_resumida" selected>📰 Noticia Completa Resumida (Fidelidad Total)</option>
+              <option value="5_cosas">🔥 5 Cosas o Datos Sorprendentes (Relacionados al Tema)</option>
+              <option value="historia_ciencia">📜 Historia de la Ciencia (Narración de Cuento / Storytelling)</option>
+              <option value="evento_astronomico">🌌 Evento Astronómico (Guía Práctica: Fecha y Visibilidad)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>🎙️ Voz del Narrador / Robot CIENCIA COOL:</label>
+            <select id="script-voice">
+              <optgroup label="🤖 Voces Robot (SSML Sintético)">
+                <option value="robot-alpha5" selected>🤖 Alpha-5 Retro (Agudo · Energético)</option>
+                <option value="robot-cyborg">🤖 Cibernético (Tono Sintético Espacial)</option>
+                <option value="robot-female">🤖 IA Femenina (Asistente Espacial)</option>
+                <option value="robot-deep">🤖 Robot Profundo (Grave · Dramático)</option>
+              </optgroup>
+              <optgroup label="🗣️ Voces Humanas Neuronales">
+                <option value="es-MX-JorgeNeural">🇲🇽 Jorge (Humana Dinámica / YouTube)</option>
+                <option value="es-MX-DaliaNeural">🇲🇽 Dalia (Humana Femenina / TikTok)</option>
+                <option value="es-ES-AlvaroNeural">🇪🇸 Álvaro (Documental / Ciencia)</option>
+              </optgroup>
+            </select>
+          </div>
+          <button id="btn-generate-script" class="btn btn-primary btn-block">✨ Generar Guion con IA</button>
+        </div>
+
+        <!-- Panel Derecho: Visualizador Interactivo del Storyboard -->
+        <div class="studio-main">
+          <div id="script-viewer" class="script-empty-state">
+            <div class="empty-icon">📝</div>
+            <p>Selecciona una noticia de la lista o escribe un tema para generar tu primer guion.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 5. PESTAÑA: BIBLIOTECA DE GUIONES -->
+    <section id="library-tab" class="tab-pane">
+      <div class="section-header">
+        <div>
+          <h2>Biblioteca de Guiones Guardados</h2>
+          <p>Accede a todos los guiones generados previamente en formato JSON y Markdown listos para video.</p>
+        </div>
+        <button id="btn-refresh-library" class="btn btn-secondary">🔄 Actualizar Biblioteca</button>
+      </div>
+
+      <div id="library-grid" class="cards-grid">
+        <div class="loading-spinner">Cargando biblioteca...</div>
+      </div>
+    </section>
+
+
+    <!-- 7. PESTAÑA: MIS VIDEOS RENDERIZADOS -->
+    <section id="videos-tab" class="tab-pane">
+      <div class="section-header">
+        <div>
+          <h2>🚀 Mis Videos Renderizados</h2>
+          <p>Videos MP4 verticales (9:16) listos para subir a TikTok, Instagram Reels y YouTube Shorts.</p>
+        </div>
+        <button id="btn-refresh-videos" class="btn btn-secondary" onclick="loadVideosLibrary()">🔄 Actualizar</button>
+      </div>
+      <div id="videos-grid" class="cards-grid">
+        <div class="loading-spinner">Aún no hay videos renderizados. ¡Genera el primero desde el Estudio!</div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Notificaciones Toast -->
+  <div id="toast" class="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,60 @@
+{
+  "title": "Llega Roman, el telescopio que supera 100 veces al Hubble",
+  "format": "evento_astronomico",
+  "estimatedDurationSec": 45,
+  "hook": {
+    "narration": "¿Sabías esto sobre Llega Roman, el telescopio que supe? ¡El universo acaba de sorprendernos otra vez!",
+    "visualDescription": "Telescopio espacial observando una nebulosa brillante con zoom dinámico",
+    "visualKeywords": [
+      "deep space",
+      "nebula 4k",
+      "universe stars"
+    ]
+  },
+  "scenes": [
+    {
+      "order": 1,
+      "badge": "Dato 1",
+      "narration": "Recientemente los científicos descubrieron algo fascinante relacionado con Llega Roman, el telescopio que.",
+      "onscreenText": "Descubrimiento Clave",
+      "visualDescription": "Animación de astrofísica y datos estelares",
+      "visualKeywords": [
+        "astronomy telescope",
+        "space discovery"
+      ]
+    },
+    {
+      "order": 2,
+      "badge": "Dato 2",
+      "narration": "Este fenómeno desafía lo que creíamos saber sobre la física y la estructura del cosmos.",
+      "onscreenText": "Desafío a la Física",
+      "visualDescription": "Representación 3D de ondas gravitacionales y estrellas",
+      "visualKeywords": [
+        "galaxy rotation",
+        "cosmic energy"
+      ]
+    },
+    {
+      "order": 3,
+      "badge": "Dato 3",
+      "narration": "Los telescopios espaciales continúan captando señales que nos ayudarán a entender su origen.",
+      "onscreenText": "Misiones Espaciales",
+      "visualDescription": "Telescopio James Webb en órbita",
+      "visualKeywords": [
+        "james webb space telescope",
+        "satellite orbit"
+      ]
+    }
+  ],
+  "callToAction": {
+    "narration": "Si te apasiona la ciencia y el espacio, ¡síguenos en CIENCIA COOL para más descubrimientos!",
+    "onscreenText": "Síguenos en CIENCIA COOL 🚀"
+  },
+  "hashtags": [
+    "#cienciacool",
+    "#astronomia",
+    "#ciencia",
+    "#tecnologia",
+    "#curiosidades"
+  ]
+}

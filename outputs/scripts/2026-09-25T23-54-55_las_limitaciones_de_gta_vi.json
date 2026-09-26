@@ -1,0 +1,63 @@
+{
+  "title": "Las limitaciones de GTA VI",
+  "format": "noticia_resumida",
+  "estimatedDurationSec": 50,
+  "hook": {
+    "narration": "¡Alerta, humanos! El juego más esperado de la década, GTA VI, está mostrando limitaciones técnicas preocupantes antes de su llegada.",
+    "visualDescription": "Un plano rápido de un control de consola de videojuegos vibrando sobre una mesa con luces de neón de fondo.",
+    "visualKeywords": [
+      "control",
+      "consola",
+      "neon"
+    ]
+  },
+  "scenes": [
+    {
+      "order": 1,
+      "badge": "El Problema",
+      "narration": "A pocos meses de su ventana de lanzamiento, los analistas de tecnología advierten que las consolas actuales podrían no soportar todo el potencial de GTA seis.",
+      "onscreenText": "¿Peligra GTA VI?",
+      "visualDescription": "Un joven frustrado frente a una pantalla de televisión que parpadea con estática.",
+      "visualKeywords": [
+        "television",
+        "joven",
+        "pantalla"
+      ]
+    },
+    {
+      "order": 2,
+      "badge": "La Limitación",
+      "narration": "El gran dolor de cabeza es lograr los sesenta fotogramas por segundo. El hardware de consolas como la Xbox Series S podría obligar a Rockstar a recortar gráficos.",
+      "onscreenText": "60 FPS en peligro",
+      "visualDescription": "Primer plano de un chip de computadora brillante procesando datos a gran velocidad.",
+      "visualKeywords": [
+        "chip",
+        "computadora",
+        "tecnologia"
+      ]
+    },
+    {
+      "order": 3,
+      "badge": "El Impacto",
+      "narration": "Esto significa que para jugar la versión definitiva sin sacrificios visuales, los jugadores tendríamos que esperar a versiones mejoradas de hardware o a la versión de PC.",
+      "onscreenText": "¿Recorte de gráficos?",
+      "visualDescription": "Una ciudad moderna de noche iluminada con rascacielos y autos en movimiento.",
+      "visualKeywords": [
+        "ciudad",
+        "calle",
+        "autos"
+      ]
+    }
+  ],
+  "callToAction": {
+    "narration": "¿Crees que tu consola podrá con este juegazo? ¡Deja tu opinión en los comentarios y sigue a CIENCIA COOL para no perderte nada del futuro tecnológico!",
+    "onscreenText": "¡Comenta y síguenos en CIENCIA COOL! 🚀"
+  },
+  "hashtags": [
+    "#cienciacool",
+    "#gtavi",
+    "#videojuegos",
+    "#tecnologia",
+    "#rockstargames"
+  ]
+}

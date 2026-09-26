@@ -1,0 +1,61 @@
+{
+  "title": "Las limitaciones de GTA VI",
+  "format": "noticia_resumida",
+  "estimatedDurationSec": 50,
+  "hook": {
+    "narration": "¡Alerta gamer! A solo dos meses de su salida, GTA VI ya muestra serias limitaciones técnicas.",
+    "visualDescription": "Un primer plano de una persona frustrada sosteniendo un control de consola frente a una pantalla brillante.",
+    "visualKeywords": [
+      "consola",
+      "mando"
+    ]
+  },
+  "scenes": [
+    {
+      "order": 1,
+      "badge": "Escena 1",
+      "narration": "¡Hola humanos! El juego más esperado de la década está a las puertas, pero los reportes de Rockstar revelan problemas para mantener la estabilidad del juego en las consolas actuales.",
+      "onscreenText": "¡GTA VI en problemas!",
+      "visualDescription": "Un joven jugando videojuegos concentrado en una habitación oscura con luces led.",
+      "visualKeywords": [
+        "televisor",
+        "auriculares",
+        "habitacion"
+      ]
+    },
+    {
+      "order": 2,
+      "badge": "Escena 2",
+      "narration": "Para lograr ese nivel de realismo y físicas avanzadas, el juego se ve obligado a limitar su resolución o la tasa de fotogramas, mostrando que la tecnología actual tiene un tope.",
+      "onscreenText": "Gráficos vs Rendimiento",
+      "visualDescription": "Acercamiento a un procesador de computadora funcionando con luces internas.",
+      "visualKeywords": [
+        "chip",
+        "circuito",
+        "computadora"
+      ]
+    },
+    {
+      "order": 3,
+      "badge": "Escena 3",
+      "narration": "Esto demuestra que la ambición de los creadores está superando la potencia del hardware moderno, abriendo el debate sobre el futuro de la optimización.",
+      "onscreenText": "Superando el límite actual",
+      "visualDescription": "Una toma aérea nocturna de una gran ciudad iluminada con rascacielos.",
+      "visualKeywords": [
+        "ciudad",
+        "edificios",
+        "luces"
+      ]
+    }
+  ],
+  "callToAction": {
+    "narration": "¿Creen que Rockstar logrará solucionarlo a tiempo o vendrá un retraso? ¡Comenten abajo y sigan a CIENCIA COOL!",
+    "onscreenText": "¿Optimización o retraso? ¡Sigue a CIENCIA COOL! 🚀"
+  },
+  "hashtags": [
+    "#gtavi",
+    "#videojuegos",
+    "#tecnologia",
+    "#cienciacool"
+  ]
+}

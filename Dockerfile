@@ -1,27 +1,33 @@
-# Imagen ligera oficial de Node.js
-FROM node:20-alpine
+# Imagen de Node.js 20 (Debian slim) con FFmpeg.
+# Ya no se necesita Python/Whisper/Aeneas: los tiempos de palabra los entrega
+# Edge TTS durante la sintesis del audio, asi que los subtitulos son exactos
+# sin transcripcion offline. Esto mantiene la imagen en ~250 MB en vez de ~4 GB.
+FROM node:20-bookworm-slim
 
-# Instalar FFmpeg y fuentes para subtítulos (paquete correcto en Alpine)
-RUN apk add --no-cache ffmpeg font-dejavu fontconfig
+# FFmpeg (render + ffprobe), DejaVu Sans Bold para el filtro `subtitles`,
+# fontconfig para que libass resuelva las fuentes, y git (algunas deps lo usan).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    fonts-dejavu \
+    fonts-dejavu-core \
+    fontconfig \
+    git \
+    ca-certificates \
+    && fc-cache -f \
+    && rm -rf /var/lib/apt/lists/*
 
-# Directorio de trabajo en el contenedor
 WORKDIR /app
 
-# Copiar archivos de dependencias
 COPY package*.json ./
 
-# Instalar dependencias de producción
 RUN npm ci --only=production
 
-# Copiar el código fuente y la interfaz pública
 COPY . .
 
-# Crear directorios de salida
 RUN mkdir -p outputs/audio outputs/media outputs/video outputs/temp
 
-# Puerto expuesto por Google Cloud Run (por defecto 8080)
 ENV PORT=8080
+ENV NODE_ENV=production
 EXPOSE 8080
 
-# Comando para iniciar el servidor
 CMD ["node", "src/server.js"]

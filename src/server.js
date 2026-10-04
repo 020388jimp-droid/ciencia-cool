@@ -1,16 +1,17 @@
-import express from 'express';
+﻿import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 
-import { fetchAllNews } from './services/newsService.js';
+import { fetchAllNews, getNewsCacheStats } from './services/newsService.js';
 import { fetchNasaAPOD, searchNasaMedia } from './services/nasaService.js';
 import { fetchTodayScienceHistory } from './services/historyService.js';
 import { generateScriptWithGemini } from './services/geminiService.js';
+import { normalizarGuionMexicano } from './services/lexicon.js';
 import { saveScript } from './services/storageService.js';
-import { generateAudioForScript, AVAILABLE_VOICES } from './services/ttsService.js';
+import { generateAudioForScript, AVAILABLE_VOICES, DEFAULT_VOICE_ID } from './services/ttsService.js';
 import { findMediaForScenes } from './services/mediaService.js';
 import { renderFinalVideo, buildRenderScenes } from './services/videoRenderService.js';
 
@@ -36,18 +37,70 @@ app.use('/video', (req, res, next) => {
   const filename = req.path.replace(/^\//, '');
   const filePath = path.join(videoDir, filename);
 
-  if (!fs.existsSync(filePath) || !filePath.endsWith('.mp4')) return next();
+  // Sanitizar nombre de archivo para prevenir path traversal
+  const sanitizedFilename = path.basename(filename);
+  const safeFilePath = path.join(videoDir, sanitizedFilename);
 
-  const stat = fs.statSync(filePath);
+  if (!fs.existsSync(safeFilePath) || !safeFilePath.endsWith('.mp4')) {
+    console.warn(`⚠️ Video no encontrado: ${filename}`);
+    return next();
+  }
+
+  const stat = fs.statSync(safeFilePath);
   const fileSize = stat.size;
+
+  // Cloud Run CORTA cualquier respuesta HTTP de más de 32 MB: el render
+  // terminaba bien, pero al descargarlo el servidor cerraba la respuesta y el
+  // <video> del navegador fallaba con "Error al cargar el video".
+  //
+  // Los videos se codifican con un presupuesto de 20 MB (ver MAX_FINAL_BYTES en
+  // videoRenderService), así que lo normal es servirlos enteros en una sola
+  // respuesta. Este troceado es solo la red de seguridad para el caso de que
+  // un archivo se pase: se trocea en respuestas de 30 MB —por debajo del límite
+  // de Cloud Run— y el navegador encadena las peticiones Range con normalidad.
+  //
+  // El tope va en 30 MB y NO en 16: ponerlo en 16 obligaba a trocear videos de
+  // 17 MB que cabían de sobra, y una descarga simple se quedaba a medias.
+  const MAX_CHUNK_BYTES = 30 * 1024 * 1024;
+
   const range = req.headers.range;
 
+  console.log(`🎬 Sirviendo video: ${sanitizedFilename} (${(fileSize / 1024 / 1024).toFixed(2)} MB)`);
+
+  // Normaliza el rango pedido. Un "bytes=0-" (abierto, que es lo que manda el
+  // <video> del navegador) llega hasta el final del archivo.
+  let start = 0;
+  let end = fileSize - 1;
   if (range) {
-    const parts = range.replace(/bytes=/, '').split('-');
-    const start = parseInt(parts[0], 10);
-    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-    const chunkSize = end - start + 1;
-    const file = fs.createReadStream(filePath, { start, end });
+    const parts = String(range).replace(/bytes=/, '').split('-');
+    if (parts[0]) start = parseInt(parts[0], 10);
+    if (parts[1]) end = parseInt(parts[1], 10);
+  }
+  if (!Number.isFinite(start) || start < 0) start = 0;
+  if (!Number.isFinite(end) || end > fileSize - 1) end = fileSize - 1;
+
+  // Solo se recorta el final si el trozo superaría el máximo por respuesta.
+  if (end - start + 1 > MAX_CHUNK_BYTES) {
+    end = start + MAX_CHUNK_BYTES - 1;
+    console.warn(
+      `⚠️ ${sanitizedFilename}: trozo recortado a ${MAX_CHUNK_BYTES / 1024 / 1024} MB ` +
+      `de ${(fileSize / 1024 / 1024).toFixed(2)} MB`
+    );
+  }
+
+  const chunkSize = end - start + 1;
+  // Si el cliente no pidió rango y el archivo entero cabe en una respuesta, se
+  // sirve como respuesta normal (200). Si no cabe, se sirve el primer trozo con
+  // 206 + Content-Range, que es una respuesta válida y el cliente la encadena.
+  if (!range && chunkSize >= fileSize) {
+    res.writeHead(200, {
+      'Content-Length': fileSize,
+      'Content-Type': 'video/mp4',
+      'Accept-Ranges': 'bytes',
+    });
+    fs.createReadStream(safeFilePath).pipe(res);
+  } else {
+    const file = fs.createReadStream(safeFilePath, { start, end });
     res.writeHead(206, {
       'Content-Range': `bytes ${start}-${end}/${fileSize}`,
       'Accept-Ranges': 'bytes',
@@ -55,21 +108,23 @@ app.use('/video', (req, res, next) => {
       'Content-Type': 'video/mp4',
     });
     file.pipe(res);
-  } else {
-    res.writeHead(200, {
-      'Content-Length': fileSize,
-      'Content-Type': 'video/mp4',
-      'Accept-Ranges': 'bytes',
-    });
-    fs.createReadStream(filePath).pipe(res);
   }
 });
 
-// API: Obtener noticias
+// API: Obtener noticias (con filtro por categoría)
 app.get('/api/news', async (req, res) => {
   try {
-    const news = await fetchAllNews();
-    res.json({ success: true, count: news.length, data: news });
+    const { category } = req.query;
+    // ?refresh=1 fuerza la descarga (botón "Actualizar noticias").
+    const force = req.query.refresh === '1' || req.query.refresh === 'true';
+    const news = await fetchAllNews(category || 'todas', { force });
+    res.json({
+      success: true,
+      count: news.length,
+      data: news,
+      category: category || 'todas',
+      cache: getNewsCacheStats()
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -110,16 +165,28 @@ app.get('/api/nasa/search', async (req, res) => {
 // API: Generar guion con IA
 app.post('/api/generate-script', async (req, res) => {
   try {
-    const { topic, newsContext, format } = req.body;
+    const { topic, newsContext, format, voiceId } = req.body;
     if (!topic) {
       return res.status(400).json({ success: false, error: 'Se requiere un tema para generar el guion.' });
     }
 
-    const script = await generateScriptWithGemini({
+    // Las voces de personaje (GIR) llevan un guion con personalidad y marcadores
+    // de tono; las demás usan el tono neutro de siempre.
+    const personality = voiceId && voiceId.startsWith('robot-gir') ? 'gir' : 'asistente';
+
+    const guionGemini = await generateScriptWithGemini({
       topic,
       newsContext: newsContext || '',
-      format: format || '5_cosas'
+      format: format || '5_cosas',
+      personality
     });
+
+    // Normaliza a español de México antes de devolverlo. Se hace AQUÍ, y no
+    // solo en la voz, para que el guion, el audio y los subtítulos digan
+    // exactamente lo mismo: si se corrigiera únicamente lo que se manda a
+    // sintetizar, se oiría "su celular" mientras el subtítulo pondría
+    // "vuestro celular".
+    const script = normalizarGuionMexicano(guionGemini);
 
     const saved = saveScript(script);
     res.json({ success: true, data: script, saved });
@@ -171,7 +238,7 @@ app.post('/api/generate-audio', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Se requiere un guion para generar el audio.' });
     }
 
-    const audioResult = await generateAudioForScript(script, voiceId || 'robot-alpha5');
+    const audioResult = await generateAudioForScript(script, voiceId || DEFAULT_VOICE_ID);
     res.json({ success: true, data: audioResult });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -260,7 +327,7 @@ app.post('/api/render-video', async (req, res) => {
   };
 
   try {
-    const { script, audioResult, mediaMatches, brandingMode, watermarkPos, watermarkOpacity } = req.body;
+    const { script, audioResult, mediaMatches, brandingMode, watermarkPos, watermarkOpacity, source, category } = req.body;
 
     if (!script) {
       sendSSE({ type: 'error', message: 'Se requiere un guion para renderizar.' });
@@ -296,13 +363,36 @@ app.post('/api/render-video', async (req, res) => {
       robotImagePath: fs.existsSync(robotImagePath) ? robotImagePath : null,
       logoPath: fs.existsSync(logoPath) ? logoPath : null,
       brandName,
-      brandingMode: brandingMode || 'alternate',
+      source: source || script.source || '',
+      category: category || script.category || '',
+      brandingMode: brandingMode || 'watermark_only',
       watermarkPos: watermarkPos || 'top-left',
       watermarkOpacity: typeof watermarkOpacity === 'number' ? watermarkOpacity : 0.40,
       onProgress: (msg) => sendSSE({ type: 'progress', message: msg })
     });
+    
+    // Log para depuración
+    console.log(`📋 Renderizado completado - Source: "${source || script.source || 'N/A'}", Category: "${category || script.category || 'N/A'}"`);
 
-    sendSSE({ type: 'done', videoUrl: result.videoUrl, filename: result.filename });
+    // Verificar que el video existe antes de enviar la respuesta
+    if (fs.existsSync(result.videoPath)) {
+      const stats = fs.statSync(result.videoPath);
+      const mb = stats.size / 1024 / 1024;
+      console.log(`✅ Video generado: ${result.filename} (${mb.toFixed(2)} MB)`);
+      // Cloud Run corta respuestas de más de 32 MB. El render ya limita el
+      // tamaño por codificación, pero si aun así se pasa se avisa en el log
+      // porque el symptoms sería un "Error al cargar el video" en el navegador.
+      if (stats.size > 32 * 1024 * 1024) {
+        console.warn(
+          `⚠️ ${result.filename} (${mb.toFixed(2)} MB) supera el límite de 32 MB de ` +
+          `Cloud Run: se servirá troceado por Range Requests.`
+        );
+      }
+      sendSSE({ type: 'done', videoUrl: result.videoUrl, filename: result.filename, size: stats.size });
+    } else {
+      console.error(`❌ Video no encontrado en: ${result.videoPath}`);
+      sendSSE({ type: 'error', message: 'El video no se generó correctamente. Intenta de nuevo.' });
+    }
     res.end();
   } catch (error) {
     console.error('Error en renderizado:', error);
@@ -360,4 +450,13 @@ app.get('/api/videos', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`\n🚀 CIENCIA COOL Studio iniciado en http://localhost:${PORT}`);
+
+  // Calentamiento de la caché de noticias al arrancar el contenedor.
+  // Con min-instances=0 cada visita paga un arranque en frío; si además tiene
+  // que esperar a que se descarguen los feeds, la primera carga se va a varios
+  // minutos. Arrancando la descarga aquí, la petición del usuario se engancha al
+  // refresco en curso (misma promesa) en vez de esperarlo desde cero.
+  fetchAllNews('todas')
+    .then(n => console.log(`🔄 Caché de noticias lista: ${n.length} artículos`))
+    .catch(e => console.error('No se pudo calentar la caché de noticias:', e.message));
 });

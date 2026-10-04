@@ -1,4 +1,4 @@
-// Estado global
+﻿// Estado global
 let currentNews = [];
 let currentHistory = [];
 
@@ -40,12 +40,24 @@ function showToast(msg, isError = false) {
 }
 
 // 1. Cargar Noticias
-async function loadNews() {
+let currentCategory = 'todas';
+
+async function loadNews(category = currentCategory, { force = false } = {}) {
+  currentCategory = category;
   const grid = document.getElementById('news-grid');
+  const btn = document.getElementById('btn-refresh-news');
+
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '⏳ Actualizando...';
+  }
   grid.innerHTML = '<div class="loading-spinner">📡 Consultando fuentes científicas en tiempo real...</div>';
 
   try {
-    const res = await fetch('/api/news');
+    // force=1 hace que el servidor descargue los feeds de nuevo en vez de
+    // responder desde caché. Evita saturar a Google News si se spamea el botón.
+    const url = `/api/news?category=${category}${force ? '&refresh=1' : ''}`;
+    const res = await fetch(url);
     const data = await res.json();
     if (!data.success) throw new Error(data.error);
 
@@ -53,6 +65,11 @@ async function loadNews() {
     renderNews(currentNews);
   } catch (error) {
     grid.innerHTML = `<div class="loading-spinner" style="color: var(--danger)">Error al cargar noticias: ${error.message}</div>`;
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '🔄 Actualizar Noticias';
+    }
   }
 }
 
@@ -176,6 +193,10 @@ window.prepareScriptFromNews = function(index) {
   document.getElementById('script-topic').value = item.title;
   document.getElementById('script-context').value = `Fuente: ${item.source}. ${item.snippet || ''}`;
   document.getElementById('script-format').value = 'noticia_resumida';
+  
+  // Guardar la fuente para el renderizado
+  window._currentNewsSource = item.source || '';
+  window._currentNewsCategory = item.category || '';
 
   // Cambiar a pestaña de estudio
   document.querySelector('[data-tab="studio-tab"]').click();
@@ -226,10 +247,13 @@ async function generateScript() {
   viewer.innerHTML = '<div class="loading-spinner">✨ Google Gemini está estructurando el guion viral y los ganchos para CIENCIA COOL...</div>';
 
   try {
+    // Se envía la voz seleccionada para que el guion adopte la personalidad
+    // correspondiente (GIR escribe con sus marcas de tono).
+    const selectedVoice = document.getElementById('script-voice')?.value || '';
     const res = await fetch('/api/generate-script', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ topic, newsContext: context, format })
+      body: JSON.stringify({ topic, newsContext: context, format, voiceId: selectedVoice })
     });
 
     const data = await res.json();
@@ -273,10 +297,7 @@ function renderStoryboard(script) {
         <div style="display:flex; align-items:center; gap:0.6rem; flex-wrap:wrap;">
           <span style="font-weight:700; color:var(--primary); font-size:0.85rem;">🎨 Estilo de Marca & Overlays:</span>
           <select id="render-branding-mode" style="background: rgba(10,14,39,0.9); border: 1px solid var(--border-color); color: #fff; padding: 0.4rem 0.75rem; border-radius: 7px; font-family: inherit; font-size: 0.85rem; cursor: pointer;">
-            <option value="alternate" selected>🔄 Alternar (Robot en Intro/Cierre + Marca de Agua translúcida)</option>
-            <option value="watermark_only">💧 Solo Marca de Agua (Logo translúcido en esquina, sin robot)</option>
-            <option value="robot_only">🤖 Solo Robot Presentador</option>
-            <option value="both">✨ Ambos (Robot + Marca de Agua simultáneos)</option>
+            <option value="watermark_only" selected>💧 Solo Marca de Agua (Logo translúcido en esquina, sin robot)</option>
             <option value="none">🚫 Video Limpio (Sin overlays)</option>
           </select>
         </div>
@@ -484,7 +505,7 @@ window.renderFinalVideoUI = async function() {
   appendLog('🎬 Iniciando render de video vertical 9:16 para redes sociales...');
 
   try {
-    const brandingMode = document.getElementById('render-branding-mode')?.value || 'alternate';
+    const brandingMode = document.getElementById('render-branding-mode')?.value || 'watermark_only';
     const watermarkPos = document.getElementById('render-watermark-pos')?.value || 'top-left';
 
     const res = await fetch('/api/render-video', {
@@ -495,7 +516,9 @@ window.renderFinalVideoUI = async function() {
         audioResult: currentScriptAudio,
         mediaMatches: currentScriptMedia || [],
         brandingMode,
-        watermarkPos
+        watermarkPos,
+        source: window._currentNewsSource || currentScript.source || '',
+        category: window._currentNewsCategory || currentScript.category || ''
       })
     });
 
@@ -504,6 +527,9 @@ window.renderFinalVideoUI = async function() {
     const decoder = new TextDecoder();
     let buffer = '';
     let finalVideoUrl = null;
+    // Handler de error del <video> del render anterior, para poder quitarlo
+    // antes de poner el nuevo (si no, se acumulan uno por render).
+    let mostrarErrorAnterior = null;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -533,11 +559,42 @@ window.renderFinalVideoUI = async function() {
     if (finalVideoUrl) {
       const player = document.getElementById('rendered-video-player');
       const dlLink = document.getElementById('render-download-link');
-      player.src = finalVideoUrl;
-      dlLink.href = finalVideoUrl;
+
+      // Agregar timestamp para evitar caché del navegador
+      const videoUrlWithCacheBust = `${finalVideoUrl}?t=${Date.now()}`;
+
+      // Los listeners se registran ANTES de asignar src. Con el orden
+      // inverso, un fallo rápido (404 o respuesta cortada) podía dispararse
+      // antes de que existiera el listener y el error se perdía en silencio,
+      // dejando el recuadro en negro sin explicación. También se limpian los
+      // listeners del render anterior: si no, se acumulan uno por render y el
+      // toast de error salía repetidas veces.
+      const mostrarError = (e) => {
+        console.error('Error cargando video:', player.error || e);
+        // El código 4 es MEDIA_ERR_SRC_NOT_SUPPORTED: el archivo llegó pero el
+        // navegador no puede decodificarlo. 2 es error de red (el caso de que
+        // Cloud Run cortara la respuesta por superar los 32 MB).
+        const detalle = player.error && player.error.code === 4
+          ? ' El archivo se descargó pero el navegador no pudo reproducirlo.'
+          : ' No se pudo descargar el archivo del servidor.';
+        showToast('Error al cargar el video.' + detalle + ' Intenta renderizar de nuevo.', true);
+      };
+      player.removeEventListener('error', mostrarErrorAnterior);
+      mostrarErrorAnterior = mostrarError;
+      player.addEventListener('error', mostrarError);
+
+      player.addEventListener('loadedmetadata', function alCargar() {
+        player.removeEventListener('loadedmetadata', alCargar);
+        console.log('✅ Video cargado correctamente:', player.duration, 'segundos');
+        showToast('🎉 ¡Video listo! Puedes descargarlo y subirlo a TikTok/Instagram/YouTube Shorts.');
+      });
+
+      player.src = videoUrlWithCacheBust;
+      dlLink.href = videoUrlWithCacheBust;
       dlLink.download = finalVideoUrl.split('/').pop();
       result.style.display = 'block';
-      showToast('🎉 ¡Video listo! Puedes descargarlo y subirlo a TikTok/Instagram/YouTube Shorts.');
+      // Fuerza a que el <video> pida los datos con la nueva URL.
+      player.load();
     }
   } catch (error) {
     appendLog('❌ Error de conexión: ' + error.message);
@@ -737,7 +794,7 @@ window.loadExistingScript = function(script) {
 
 // Listeners
 function setupEventListeners() {
-  document.getElementById('btn-refresh-news')?.addEventListener('click', loadNews);
+  document.getElementById('btn-refresh-news')?.addEventListener('click', () => loadNews(currentCategory, { force: true }));
   document.getElementById('btn-refresh-history')?.addEventListener('click', loadHistory);
   document.getElementById('btn-refresh-library')?.addEventListener('click', loadLibrary);
   document.getElementById('btn-generate-script')?.addEventListener('click', generateScript);
@@ -774,11 +831,7 @@ function setupEventListeners() {
       document.querySelectorAll('.filter-chip[data-category]').forEach(c => c.classList.remove('active'));
       chip.classList.add('active');
       const cat = chip.getAttribute('data-category');
-      if (cat === 'all') {
-        renderNews(currentNews);
-      } else {
-        renderNews(currentNews.filter(n => n.category === cat));
-      }
+      loadNews(cat);
     });
   });
 

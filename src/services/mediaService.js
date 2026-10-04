@@ -14,7 +14,7 @@ async function searchPexelsVideos(query, orientation = 'portrait') {
   if (!apiKey || apiKey === 'tu_pexels_key_aqui') return [];
 
   try {
-    const url = `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&per_page=5&orientation=${orientation}&size=medium&locale=es-ES`;
+    const url = `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&per_page=8&orientation=${orientation}&size=medium&locale=es-ES`;
     const res = await axios.get(url, {
       headers: { Authorization: apiKey },
       timeout: 8000
@@ -55,7 +55,7 @@ async function searchPixabayVideos(query) {
   if (!apiKey || apiKey === 'tu_pixabay_key_aqui') return [];
 
   try {
-    const url = `https://pixabay.com/api/videos/?key=${apiKey}&q=${encodeURIComponent(query)}&per_page=5&video_type=film&lang=es`;
+    const url = `https://pixabay.com/api/videos/?key=${apiKey}&q=${encodeURIComponent(query)}&per_page=8&video_type=film&lang=es`;
     const res = await axios.get(url, { timeout: 8000 });
 
     return (res.data?.hits || []).map(v => {
@@ -269,30 +269,30 @@ export function buildSearchQuery(keywords, description, narration, scriptTitle =
   }
 
   // 2. Respaldo: palabras del description visual (> 4 letras, evitar artículos)
-  if (terms.length < 2 && description) {
-    const stopWords = new Set(['para', 'como', 'desde', 'hacia', 'sobre', 'entre', 'with', 'from', 'that', 'this']);
+  if (terms.length < 4 && description) {
+    const stopWords = new Set(['para', 'como', 'desde', 'hacia', 'sobre', 'entre', 'with', 'from', 'that', 'this', 'una', 'unos', 'unas', 'cada', 'donde', 'cuando', 'mientras', 'porque', 'aunque', 'además', 'también', 'incluso', 'primer', 'primera', 'segundo', 'segunda']);
     const descWords = description.toLowerCase().split(/\s+/)
       .filter(w => w.length > 4 && !stopWords.has(w));
     terms.push(...descWords);
   }
 
   // 3. Último recurso: palabras clave de la narración
-  if (terms.length < 2 && narration) {
-    const narWords = narration.toLowerCase().split(/\s+/).filter(w => w.length > 6);
+  if (terms.length < 4 && narration) {
+    const narWords = narration.toLowerCase().split(/\s+/).filter(w => w.length > 5);
     terms.push(...narWords);
   }
 
   if (terms.length === 0 && scriptTitle) {
-    terms = scriptTitle.split(/\s+/).filter(w => w.length > 4).slice(0, 3);
+    terms = scriptTitle.split(/\s+/).filter(w => w.length > 4).slice(0, 5);
   }
 
-  // Limpiar, normalizar y traducir al inglés (máximo 2 términos para mejor relevancia)
+  // Limpiar, normalizar y traducir al inglés (máximo 4 términos para mejor relevancia)
   const cleanTerms = terms
-    .slice(0, 3)
+    .slice(0, 5)
     .map(t => t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9\s]/gi, '').trim())
     .filter(Boolean);
 
-  const query = cleanTerms.slice(0, 2).join(' ') || 'science';
+  const query = cleanTerms.slice(0, 4).join(' ') || 'science';
   return translateToEnglish(query);
 }
 

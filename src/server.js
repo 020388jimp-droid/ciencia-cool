@@ -14,7 +14,7 @@ import { saveScript } from './services/storageService.js';
 import { generateAudioForScript, AVAILABLE_VOICES, DEFAULT_VOICE_ID } from './services/ttsService.js';
 import { findMediaForScenes } from './services/mediaService.js';
 import { renderFinalVideo, buildRenderScenes } from './services/videoRenderService.js';
-import { ejecutarPipeline } from './services/pipelineService.js';
+import { ejecutarPipeline, estadoPipeline } from './services/pipelineService.js';
 
 dotenv.config();
 
@@ -249,25 +249,34 @@ app.post('/api/pipeline-completo', async (req, res) => {
     const {
       categoria, topic, voiceId, format,
       brandingMode, watermarkPos, watermarkOpacity,
+      jobId, dryRun,
     } = req.body || {};
 
-    console.log(`🤖 Pipeline: ${categoria || 'auto'} · ${topic || 'noticia automática'}`);
+    const etiqueta = jobId ? ` · job ${jobId}` : '';
+    console.log(`🤖 Pipeline: ${categoria || 'auto'} · ${topic || 'noticia automática'}${etiqueta}`);
 
     const data = await ejecutarPipeline({
       categoria, topic, voiceId, format,
       brandingMode, watermarkPos, watermarkOpacity,
+      jobId: jobId || null,
+      dryRun: dryRun === true,
       onProgress: (msg) => {
         pasos.push(msg);
         console.log(`   ${msg}`);
       },
     });
 
+    // El ensayo no produce video: no hay nada que publicar.
+    if (data.dryRun) {
+      return res.json({ success: true, elapsedSec: 0, steps: pasos, data });
+    }
+
     const segundos = Math.round((Date.now() - t0) / 1000);
-    console.log(`✅ Pipeline completado en ${segundos}s → ${data.videoFilename} (${(data.sizeBytes / 1024 / 1024).toFixed(2)} MB)`);
+    console.log(`✅ Pipeline completado en ${segundos}s ${data.reutilizado ? '(reutilizado, no se regeneró)' : ''} → ${data.videoFilename} (${(data.sizeBytes / 1024 / 1024).toFixed(2)} MB)`);
 
     // El render devuelve una ruta relativa ("/video/x.mp4"). Quien publica
     // necesita la URL ABSOLUTA: n8n la descarga desde fuera e Instagram va a
-    // buscarla por su cuenta para processing, así que relativa no le sirve.
+    // buscarla por su cuenta para el processing, así que relativa no le sirve.
     const base = `${req.protocol}://${req.get('host')}`;
 
     res.json({
@@ -276,7 +285,6 @@ app.post('/api/pipeline-completo', async (req, res) => {
       steps: pasos,
       data: {
         ...data,
-        videoUrl: data.videoUrl,
         videoUrlAbsoluta: `${base}${data.videoUrl}`,
         // Segundos que tardó cada paso. Si un día el tiempo se dispara, esto
         // dice dónde mirar sin tener que reproducir la ejecución entera.
@@ -285,6 +293,21 @@ app.post('/api/pipeline-completo', async (req, res) => {
     });
   } catch (error) {
     const segundos = Math.round((Date.now() - t0) / 1000);
+
+    // 429: ya hay una generación en marcha y la cola está llena. No es un
+    // fallo del pipeline, es que hay que esperar. n8n debe reintentar.
+    if (error.codigo === 'PIPELINE_BUSY') {
+      console.warn(`⏳ Pipeline: ${error.message}`);
+      return res.status(429)
+        .set('Retry-After', '120')
+        .json({
+          success: false,
+          error: error.message,
+          reintentarEnSeg: 120,
+          ocupado: estadoPipeline(),
+        });
+    }
+
     console.error(`❌ Pipeline falló tras ${segundos}s:`, error.message);
     // Se devuelven los pasos completados para saber dónde se rompió.
     res.status(500).json({
@@ -296,14 +319,28 @@ app.post('/api/pipeline-completo', async (req, res) => {
   }
 });
 
-// API: Comprobar si la clave del pipeline es válida, sin generar nada.
-// Sirve para que n8n valide su configuración al arrancar.
+// API: Estado del pipeline. No genera nada.
+// Sirve para que n8n valide su configuración al arrancar y para saber si el
+// servidor está ocupado antes de lanzar una generación.
 app.get('/api/pipeline-completo/status', (req, res) => {
   const configurada = Boolean(PIPELINE_KEY);
+  const autorizada = claveValida(req.get('X-Pipeline-Key'));
+  const ocupado = estadoPipeline();
+
   res.json({
     success: true,
     pipelineKeyConfigured: configurada,
-    authorized: claveValida(req.get('X-Pipeline-Key')),
+    authorized: autorizada,
+    ocupado,
+    listo: autorizada && ocupado.enCurso === 0 && ocupado.enCola === 0,
+    videosEnDisco: (() => {
+      const dir = path.join(projectRoot, 'outputs', 'video');
+      try {
+        return fs.readdirSync(dir).filter(f => f.endsWith('.mp4')).length;
+      } catch {
+        return 0;
+      }
+    })(),
     hint: configurada
       ? 'Usa el header X-Pipeline-Key con el valor de la variable PIPELINE_KEY.'
       : 'Falta definir PIPELINE_KEY en el servidor.',

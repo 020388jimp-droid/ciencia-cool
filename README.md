@@ -51,6 +51,8 @@ curl -X POST "https://TU-SERVICIO.run.app/api/pipeline-completo" \
 | `brandingMode` | `watermark_only` | `watermark_only` o `none` |
 | `watermarkPos` | `top-left` | Posición de la marca de agua |
 | `watermarkOpacity` | `0.40` | Opacidad de la marca de agua |
+| `jobId` | — | Si se repite el mismo, **devuelve el resultado anterior en vez de generar otro video**. Evita duplicados cuando n8n reintenta |
+| `dryRun` | `false` | Con `true` no genera nada: solo valida y devuelve el plan. Ideal para probar la configuración de n8n sin gastar cuota |
 
 ### Respuesta
 
@@ -69,6 +71,8 @@ curl -X POST "https://TU-SERVICIO.run.app/api/pipeline-completo" \
     "category": "ciencia",
     "source": "ABC",
     "newsTitle": "Titular original de la noticia",
+    "jobId": "video-2026-10-06",
+    "reutilizado": false,
     "sceneCount": 3,
     "tiempos": { "guion": 12, "audio": 50, "medios": 2, "render": 103 }
   }
@@ -78,16 +82,38 @@ curl -X POST "https://TU-SERVICIO.run.app/api/pipeline-completo" \
 Usa **`videoUrlAbsoluta`**: es pública y es la que necesitan tanto n8n para
 descargar el archivo como Instagram para ir a buscarlo al processing.
 
+### Códigos de respuesta
+
+| Código | Cuándo | Qué hacer |
+|---|---|---|
+| `200` | Todo correcto | Publicar el video |
+| `401` | Falta o es incorrecta la clave | Revisar `X-Pipeline-Key` |
+| `429` | Ya hay una generación en marcha y la cola está llena | Esperar lo que indique `Retry-After` (120 s) y reintentar |
+| `500` | Falló la generación | Mirar `steps` para ver en qué paso se rompió |
+| `503` | El servidor no tiene `PIPELINE_KEY` configurada | Revisar las variables de entorno del servicio |
+
 ### Cosas que conviene saber
 
-- **Tarda unos 2-3 minutos.** El render se lleva ~60% del tiempo. Si lo orquestas
+- **Tarda unos 3 minutos.** El render se lleva ~60% del tiempo. Si lo orquestas
   desde n8n, sube el timeout del nodo HTTP Request a **480000 ms** (480 s): el
   valor por defecto son 300 s y se queda corto.
+- **Una generación a la vez, con una de espera.** Medido: 3 en paralelo tardan
+  386-437 s cada una porque se reparten los 2 vCPU; en serie tardan lo mismo en
+  total pero cada una se responde en ~165 s. No es una limitación de rendimiento,
+  es para que ninguna se pase del límite de 600 s de Cloud Run.
 - **Cloud Run tiene un disco efímero.** El MP4 desaparece si la instancia se
   reinicia, así que hay que publicarlo nada más generarlo.
 - **Cloud Run corta respuestas de más de 32 MB.** El render ya limita el archivo a
   20 MB de presupuesto para que siempre quepa.
-- **`GET /api/pipeline-completo/status`** sirve para comprobar la clave sin generar
-  nada (útil al arrancar n8n).
-- Si el render falla, la respuesta incluye en `steps` los pasos que sí se
-  completaron, para saber dónde se rompió.
+- **`GET /api/pipeline-completo/status`** dice si la clave vale, si el servidor
+  está ocupado y cuántos videos hay en disco, sin generar nada.
+
+### Probarlo
+
+```bash
+npm run test:pipeline              # seguridad, validación y estado (instantáneo)
+node test_pipeline.js --real       # además genera un video de verdad (~3 min)
+```
+
+La clave se lee de la variable `PIPELINE_KEY` o de `outputs/key.txt`, que está en
+`.gitignore`.

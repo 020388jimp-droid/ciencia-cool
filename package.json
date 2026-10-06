@@ -12,7 +12,8 @@
     "auto": "node src/cli/index.js auto",
     "auto:history": "node src/cli/index.js auto --history",
     "gui": "node src/server.js",
-    "dev": "node src/server.js"
+    "dev": "node src/server.js",
+    "test:pipeline": "node test_pipeline.js"
   },
   "keywords": [],
   "author": "",

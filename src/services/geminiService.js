@@ -141,6 +141,7 @@ FORMATO DE SALIDA OBLIGATORIO:
 Responde ÚNICAMENTE con un JSON válido estricto, sin bloques de código markdown:
 {
   "title": "Título corto y atractivo",
+  "description": "Descripción de 2 o 3 frases para la publicación del video: qué se cuenta, por qué importa y una pregunta para comentar. Sin emojis ni hashtags, esos van aparte.",
   "format": "${format}",
   "category": "tecnologia|medicina|astronomia|ciencia|videojuegos|medio_ambiente",
   "estimatedDurationSec": 50,

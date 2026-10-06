@@ -14,6 +14,7 @@ import { saveScript } from './services/storageService.js';
 import { generateAudioForScript, AVAILABLE_VOICES, DEFAULT_VOICE_ID } from './services/ttsService.js';
 import { findMediaForScenes } from './services/mediaService.js';
 import { renderFinalVideo, buildRenderScenes } from './services/videoRenderService.js';
+import { ejecutarPipeline } from './services/pipelineService.js';
 
 dotenv.config();
 
@@ -23,6 +24,11 @@ const projectRoot = path.resolve(__dirname, '..');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Cloud Run termina TLS en un proxy y reenvía el protocolo en la cabecera
+// X-Forwarded-Proto. Sin esto, req.protocol sale como "http" y las URLs
+// absolutas que se generan para publicar quedarían sin cifrar.
+app.set('trust proxy', true);
 
 app.use(cors());
 app.use(express.json());
@@ -193,6 +199,115 @@ app.post('/api/generate-script', async (req, res) => {
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PIPELINE AUTOMÁTICO
+//
+// Un endpoint que hace TODO el trabajo de una vez: elige noticia, escribe el
+// guion, sintetiza la voz, busca los videos de stock y renderiza el MP4.
+//
+// Existe para que n8n (o cualquier orquestador) necesite una sola llamada en vez
+// de encadenar cuatro endpoints e interpretar el SSE del render.
+//
+// SIN CLAVE ESTÁ CERRADO, y con razón: el endpoint es público (Cloud Run corre
+// con --allow-unauthenticated) y cada llamada gasta cuota de Gemini y ffmpeg. Sin
+// esto, cualquiera que encontrara la URL podría generar videos a tu costa.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const PIPELINE_KEY = process.env.PIPELINE_KEY || '';
+
+/** Comparación en tiempo constante, para no filtrar la clave a fuerza de intentos. */
+function claveValida(recibida) {
+  if (!PIPELINE_KEY) return false;
+  if (!recibida) return false;
+  if (recibida.length !== PIPELINE_KEY.length) return false;
+  let diff = 0;
+  for (let i = 0; i < recibida.length; i++) {
+    diff |= recibida.charCodeAt(i) ^ PIPELINE_KEY.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+app.post('/api/pipeline-completo', async (req, res) => {
+  const clave = req.get('X-Pipeline-Key') || req.body?.key;
+
+  if (!PIPELINE_KEY) {
+    return res.status(503).json({
+      success: false,
+      error: 'PIPELINE_KEY no está configurada en el servidor. Sin ella este endpoint queda cerrado por seguridad.',
+    });
+  }
+  if (!claveValida(clave)) {
+    console.warn(`🚫 Acceso denegado a /api/pipeline-completo desde ${req.ip}`);
+    return res.status(401).json({ success: false, error: 'Clave inválida o ausente (header X-Pipeline-Key).' });
+  }
+
+  const t0 = Date.now();
+  const pasos = [];
+  try {
+    const {
+      categoria, topic, voiceId, format,
+      brandingMode, watermarkPos, watermarkOpacity,
+    } = req.body || {};
+
+    console.log(`🤖 Pipeline: ${categoria || 'auto'} · ${topic || 'noticia automática'}`);
+
+    const data = await ejecutarPipeline({
+      categoria, topic, voiceId, format,
+      brandingMode, watermarkPos, watermarkOpacity,
+      onProgress: (msg) => {
+        pasos.push(msg);
+        console.log(`   ${msg}`);
+      },
+    });
+
+    const segundos = Math.round((Date.now() - t0) / 1000);
+    console.log(`✅ Pipeline completado en ${segundos}s → ${data.videoFilename} (${(data.sizeBytes / 1024 / 1024).toFixed(2)} MB)`);
+
+    // El render devuelve una ruta relativa ("/video/x.mp4"). Quien publica
+    // necesita la URL ABSOLUTA: n8n la descarga desde fuera e Instagram va a
+    // buscarla por su cuenta para processing, así que relativa no le sirve.
+    const base = `${req.protocol}://${req.get('host')}`;
+
+    res.json({
+      success: true,
+      elapsedSec: segundos,
+      steps: pasos,
+      data: {
+        ...data,
+        videoUrl: data.videoUrl,
+        videoUrlAbsoluta: `${base}${data.videoUrl}`,
+        // Segundos que tardó cada paso. Si un día el tiempo se dispara, esto
+        // dice dónde mirar sin tener que reproducir la ejecución entera.
+        tiempos: data.tiempos,
+      },
+    });
+  } catch (error) {
+    const segundos = Math.round((Date.now() - t0) / 1000);
+    console.error(`❌ Pipeline falló tras ${segundos}s:`, error.message);
+    // Se devuelven los pasos completados para saber dónde se rompió.
+    res.status(500).json({
+      success: false,
+      elapsedSec: segundos,
+      error: error.message,
+      steps: pasos,
+    });
+  }
+});
+
+// API: Comprobar si la clave del pipeline es válida, sin generar nada.
+// Sirve para que n8n valide su configuración al arrancar.
+app.get('/api/pipeline-completo/status', (req, res) => {
+  const configurada = Boolean(PIPELINE_KEY);
+  res.json({
+    success: true,
+    pipelineKeyConfigured: configurada,
+    authorized: claveValida(req.get('X-Pipeline-Key')),
+    hint: configurada
+      ? 'Usa el header X-Pipeline-Key con el valor de la variable PIPELINE_KEY.'
+      : 'Falta definir PIPELINE_KEY en el servidor.',
+  });
 });
 
 // API: Listar guiones generados previamente

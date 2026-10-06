@@ -108,7 +108,100 @@ descargar el archivo como Instagram para ir a buscarlo al processing.
 - **`GET /api/pipeline-completo/status`** dice si la clave vale, si el servidor
   está ocupado y cuántos videos hay en disco, sin generar nada.
 
-### Probarlo
+## 🤖 n8n: orquestador de publicación (VM en Google Cloud)
+
+n8n es el que llama al pipeline y sube el resultado a las redes. Vive en una VM
+`e2-micro` de Google Cloud, que entra en el **free tier** en las regiones de US,
+igual que el resto del proyecto.
+
+| Recurso | Coste |
+|---|---|
+| VM `e2-micro` en `us-central1-a` | Gratis (free tier) |
+| Disco estándar de 30 GB | Gratis (incluye el SO) |
+| Docker + n8n self-hosted | Gratis |
+| Egreso de red | 1 GB/mes gratis; ~30 videos ≈ 1,8 GB → **~$0,15** |
+
+### ⚠️ El panel NO está abierto a internet
+
+n8n escucha en `127.0.0.1:5678` dentro de la VM, así que **no es accesible desde
+internet**. Ni por IP ni por ningún puerto. Comprobado: el 5678 da `TcpTestSucceeded: False`
+desde fuera de la VM.
+
+Se entra por **túnel SSH**:
+
+```bat
+Abrir-n8n.bat
+```
+
+o a mano:
+
+```bat
+gcloud compute ssh ciencia-cool-n8n --zone=us-central1-a -- -L 5678:localhost:5678
+```
+
+Luego se abre <http://localhost:5678>. La ventana del túnel tiene que seguir
+abierta mientras trabajes en n8n.
+
+La primera vez hay que **crear la cuenta de propietario**. A partir de ahí, n8n
+pide nombre, correo y contraseña.
+
+### Ajustes de la VM
+
+La `e2-micro` del free tier tiene **969 MB de RAM**, y n8n corre sobre Node, que
+es hambriento. Por eso:
+
+- **2 GB de swap** en `/swapfile` (ya está en `/etc/fstab`, sobrevive reinicios).
+- **Tope de memoria al contenedor** (`mem_limit: 700m`, `memswap_limit: 1800m`).
+  Sin tope, n8n se comería toda la RAM y lo mataría el OOM killer del kernel,
+  que puede llevarse por delante cualquier proceso. Con tope, lo que muere es el
+  contenedor, que n8n reinicia solo gracias a `restart: unless-stopped`.
+- **Zona horaria** `America/Mexico_City`, para que los horarios de publicación
+  sean los de México y no los de UTC.
+
+Si alguna vez n8n va lento o se reinicia solo, mira la memoria primero:
+```bash
+docker stats --no-stream
+docker logs --tail 50 n8n
+```
+
+### Mantenimiento
+
+```bash
+# Entrar a la VM
+gcloud compute ssh ciencia-cool-n8n --zone=us-central1-a
+
+# Reiniciar n8n
+cd /opt/n8n && sudo docker compose restart
+
+# Actualizar a la última versión
+cd /opt/n8n && sudo docker compose pull && sudo docker compose up -d
+
+# Ver logs
+sudo docker logs -f n8n
+
+# Ver la clave de cifrado de credenciales (¡guárdala!)
+sudo cat /opt/n8n/.env
+```
+
+⚠️ **La clave `N8N_ENCRYPTION_KEY` de `/opt/n8n/.env` cifra todas las credenciales
+de las redes que se guarden en n8n.** Si se pierde, habrá que volver a meter a
+mano las claves de YouTube, Instagram y TikTok. Conviene copiar ese fichero a
+algún sitio seguro.
+
+### Nota sobre n8n y el puerto 5678
+
+Si al abrir el túnel la página da **404**, no es que esté roto: n8n exige que la
+petición venga con la cabecera `Accept` de un navegador. Un `curl` normal
+(`Accept: */*`) recibe 404, pero el navegador abre la interfaz sin problema. Para
+comprobarlo por consola:
+
+```bash
+curl -H "Accept: text/html" -o /dev/null -w "%{http_code}\n" http://127.0.0.1:5678/
+```
+
+---
+
+## 📋 Probarlo
 
 ```bash
 npm run test:pipeline              # seguridad, validación y estado (instantáneo)

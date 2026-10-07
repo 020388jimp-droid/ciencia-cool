@@ -5,6 +5,93 @@ una pregunta para que me mandes la captura y comprobemos juntos que va bien.
 
 ---
 
+# PARTE 0 · Configurar Termius (opcional, pero más cómodo)
+
+> **Estado actual:** la clave de Termius ya está generada y registrada en Google
+> Cloud. Verificado que funciona: SSH ✅, reenvío de puerto ✅, HTTP 200 ✅.
+>
+> Solo queda instalar Termius y decirle dónde está la clave.
+
+## Datos exactos que vas a necesitar
+
+| Qué | Valor |
+|---|---|
+| **Dirección del servidor** | `136.112.176.34` |
+| **Usuario** | `LENOVO` |
+| **Puerto** | `22` |
+| **Clave privada** | `C:\Users\LENOVO\.ssh\ciencia_cool_n8n` |
+| **Reenvío de puerto** | local `5678` → `localhost:5678` |
+
+## Paso 1 · Instalar Termius
+
+1. Abre <https://termius.com/download>
+2. Pulsa **Download for Windows**
+3. Ejecuta el instalador que se descarga
+4. Ábrelo. La primera vez te pedirá crear una cuenta de Termius (es gratis).
+   Si prefieres no crear cuenta, busca la opción **"Skip"** o **"Continue without account"**.
+
+## Paso 2 · Importar la clave
+
+1. En Termius, pulsa el icono de **llave** (Keychain) en la barra lateral izquierda
+2. Pulsa **+ Add key** → **Import from file**
+3. Ve a `C:\Users\LENOVO\.ssh\` y selecciona el archivo **`ciencia_cool_n8n`**
+   (el que **no** termina en `.pub`)
+4. Dale un nombre reconocible, por ejemplo `CIENCIA COOL n8n`
+
+> ⚠️ **No** importes el archivo `ciencia_cool_n8n.pub`. El `.pub` es la clave
+> **pública**, que es la que ya está en Google. Termius necesita la **privada**.
+
+## Paso 3 · Crear la conexión
+
+1. En la barra lateral, pulsa **Hosts**
+2. Pulsa **+ Add host**
+3. Rellena así:
+
+| Campo | Valor |
+|---|---|
+| **Label** | `CIENCIA COOL n8n` |
+| **Hostname** | `136.112.176.34` |
+| **Username** | `LENOVO` |
+| **Port** | `22` |
+| **Key** | `CIENCIA COOL n8n` (la que importaste) |
+
+4. Guarda
+
+## Paso 4 · Configurar el reenvío de puerto
+
+Esto es lo que hace que `localhost:5678` de tu PC apunte al servidor.
+
+1. Dentro de la conexión que acabas de crear, busca **Port Forwarding**
+   (a veces está en **"Edit host"** → **Port Forwarding**)
+2. Pulsa **+ Add rule** y elige **Local**
+3. Rellena:
+
+| Campo | Valor |
+|---|---|
+| **Source port** | `5678` |
+| **Destination** | `localhost:5678` |
+
+4. Guarda
+
+## Paso 5 · Conectar
+
+1. Haz **doble clic** en la conexión `CIENCIA COOL n8n`
+2. Se abre una terminal dentro de Termius con el banner de Debian
+3. **No cierres esa terminal** mientras estés en n8n
+4. Abre Chrome y ve a `http://localhost:5678`
+
+## ➡️ Envíame captura
+
+**Mándame captura de la conexión ya creada en Termius** (se ve el label, el
+hostname y la regla de port forwarding). Con eso confirmo que está bien
+configurada y pasamos a la Parte 2.
+
+---
+
+# PARTE 1 · Abrir el túnel
+
+---
+
 ## 📋 Datos que vas a necesitar
 
 Tenlos a mano. No hace falta que los entiendas todos todavía.

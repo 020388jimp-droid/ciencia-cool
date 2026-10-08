@@ -285,7 +285,9 @@ app.post('/api/pipeline-completo', async (req, res) => {
       steps: pasos,
       data: {
         ...data,
-        videoUrlAbsoluta: `${base}${data.videoUrl}`,
+        // Preferir la URL de GCS (permanente) sobre la de Cloud Run (efímera).
+        // Si la subida a GCS falló, se cae a la de Cloud Run.
+        videoUrlAbsoluta: data.videoUrlGcs || `${base}${data.videoUrl}`,
         // Segundos que tardó cada paso. Si un día el tiempo se dispara, esto
         // dice dónde mirar sin tener que reproducir la ejecución entera.
         tiempos: data.tiempos,

@@ -97,12 +97,13 @@ descargar el archivo como Instagram para ir a buscarlo al processing.
 - **Tarda unos 3 minutos.** El render se lleva ~60% del tiempo. Si lo orquestas
   desde n8n, sube el timeout del nodo HTTP Request a **480000 ms** (480 s): el
   valor por defecto son 300 s y se queda corto.
-- **Una generación a la vez, con una de espera.** Medido: 3 en paralelo tardan
-  386-437 s cada una porque se reparten los 2 vCPU; en serie tardan lo mismo en
-  total pero cada una se responde en ~165 s. No es una limitación de rendimiento,
-  es para que ninguna se pase del límite de 600 s de Cloud Run.
-- **Cloud Run tiene un disco efímero.** El MP4 desaparece si la instancia se
-  reinicia, así que hay que publicarlo nada más generarlo.
+- **El video se sube a Google Cloud Storage.** Cloud Run tiene un disco efímero:
+  el MP4 desaparece cuando la instancia se reinicia, y la URL del render deja de
+  funcionar a los minutos. Por eso el pipeline lo sube a un bucket de GCS y
+  devuelve `videoUrlGcs`, que es permanente. Usa esa URL para publicar.
+- **Se borra después de publicar.** El workflow de n8n borra el video de GCS
+  nada más terminar de publicarlo en todas las redes. Así solo hay un video a la
+  vez en almacenamiento y el coste es de céntimos al año.
 - **Cloud Run corta respuestas de más de 32 MB.** El render ya limita el archivo a
   20 MB de presupuesto para que siempre quepa.
 - **`GET /api/pipeline-completo/status`** dice si la clave vale, si el servidor

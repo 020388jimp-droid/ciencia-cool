@@ -15,6 +15,7 @@
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import { Storage } from '@google-cloud/storage';
 
 import { fetchAllNews } from './newsService.js';
 import { generateScriptWithGemini } from './geminiService.js';
@@ -26,6 +27,56 @@ import { renderFinalVideo, buildRenderScenes } from './videoRenderService.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, '..', '..');
+
+// ─── Google Cloud Storage ────────────────────────────────────────────────────
+//
+// Cloud Run tiene un disco EFÍMERO: el MP4 desaparece cuando la instancia se
+// reinicia, y la URL que devuelve el render deja de funcionar a los pocos
+// minutos. Para que el video sobreviva (y las redes puedan descargarlo cuando
+// quieran), se sube a un bucket de GCS, que es permanente.
+//
+// El bucket es público de lectura a propósito: los videos van a parar a redes
+// sociales, así que no tienen por qué ser privados. El nombre del bucket es
+// suficientemente largo y aleatorio como para que no lo encuentren por azar.
+const BUCKET = 'ciencia-cool-videos-271857970093';
+const storage = new Storage();
+
+/**
+ * Sube el MP4 al bucket y devuelve su URL pública permanente.
+ *
+ * El bucket tiene acceso uniforme a nivel de bucket (UBLA) y una política IAM
+ * que da lectura pública a allUsers. Con UBLA NO se puede llamar a makePublic()
+ * por objeto — Google lo rechaza con "Cannot update access control for an
+ * object when uniform bucket-level access is enabled". No hace falta: la
+ * política del bucket ya hace públicos a todos los objetos.
+ *
+ * Si la subida falla, se devuelve null y el pipeline sigue: mejor un video que
+ * solo existe en Cloud Run (y dura 5 minutos) que no tener video.
+ */
+async function subirAGcs(videoPath, nombreArchivo) {
+  try {
+    const bucket = storage.bucket(BUCKET);
+    const archivo = bucket.file(nombreArchivo);
+
+    await new Promise((resolve, reject) => {
+      fs.createReadStream(videoPath)
+        .pipe(archivo.createWriteStream({
+          metadata: { contentType: 'video/mp4' },
+          resumable: false,
+        }))
+        .on('error', reject)
+        .on('finish', resolve);
+    });
+
+    // No se llama a makePublic(): con UBLA la política IAM del bucket ya hace
+    // público el objeto. Llamarlo rompe la subida.
+    const url = `https://storage.googleapis.com/${BUCKET}/${nombreArchivo}`;
+    return url;
+  } catch (error) {
+    console.error('No se pudo subir a GCS:', error.message);
+    return null;
+  }
+}
 
 const CATEGORIAS_VALIDAS = new Set([
   'astronomia', 'ciencia', 'tecnologia', 'medicina', 'videojuegos', 'medio_ambiente',
@@ -363,8 +414,24 @@ export async function ejecutarPipeline(opts = {}) {
     marcar('render', paso);
     const pub = construirPublicacion(script, noticia);
 
+    // Subir a GCS para que el video sobreviva al disco efímero de Cloud Run.
+    // Sin esto, la URL del render deja de funcionar a los minutos de generarse.
+    paso = Date.now();
+    log('Subiendo el video a Google Cloud Storage...');
+    const urlGcs = stat.size > 0
+      ? await subirAGcs(resultado.videoPath, resultado.filename)
+      : null;
+    if (urlGcs) {
+      log(`Video disponible en GCS: ${urlGcs}`);
+    } else {
+      log('No se pudo subir a GCS; se devuelve la URL de Cloud Run (temporal).');
+    }
+    marcar('subida a GCS', paso);
+
     const salida = {
       videoUrl: resultado.videoUrl,
+      videoUrlAbsoluta: urlGcs || resultado.videoUrl,
+      videoUrlGcs: urlGcs,
       videoFilename: resultado.filename,
       sizeBytes: stat.size,
       title: pub.titulo,

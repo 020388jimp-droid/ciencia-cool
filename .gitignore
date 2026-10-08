@@ -29,3 +29,6 @@ Thumbs.db
 .vscode/
 .idea/
 outputs/key.txt
+
+# Archivos temporales de pruebas
+outputs/_*

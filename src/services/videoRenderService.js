@@ -238,6 +238,9 @@ export async function renderFinalVideo({
   brandingMode = 'watermark_only', // 'watermark_only' | 'none'
   watermarkPos = 'top-left',
   watermarkOpacity = 0.40,
+  // Gestos de GIR: [{ ruta, ini, fin }] ya resueltos con sus tiempos. Viene
+  // calculado desde el pipeline porque allí se sabe dónde cae cada frase.
+  gestos = [],
   onProgress = console.log
 }) {
   onProgress('🎬 Iniciando renderizado de video...');
@@ -421,36 +424,61 @@ export async function renderFinalVideo({
   const narrationDuration = scenes.reduce((acc, s) => acc + (s.durationSec || 6), 0);
   const ctaStart = Math.max(hookDuration, narrationDuration - ctaDuration);
 
+  // ─── ORDEN DE LOS INPUTS ──────────────────────────────────────────────────
+  // ffmpeg numera las entradas por el orden en que aparecen: [0] video, [1]
+  // audio, [2] robot, [3..] gestos, [último] logo.
+  //
+  // El bug que había aquí: se añadían `-i robot` y `-i logo` ANTES de los
+  // gestos, así que el logo quedaba en la posición [3] y el primer gesto en la
+  // [4]. Los filtros, en cambio, asignaban los índices en el orden en que se
+  // DIBUJAN (robot, gestos, logo), así que el dibujo del logo cogía la imagen
+  // del gesto y cada gesto cogía la del logo: el robot suelto aparecía arriba
+  // a la izquierda, justo donde debía ir la marca de agua.
+  //
+  // Por eso cada `-i` se empuja en el MISMO sitio donde se consume su índice:
+  // primero el robot, luego los gestos, y el logo al final.
   const ffmpegArgs = [
     '-i', concatenatedPath,  // [0:v]
     '-i', masterAudioPath     // [1:a] audio por escenas, alineado con los SRT
   ];
-
-  if (hasRobot) ffmpegArgs.push('-i', robotImagePath);
-  if (hasLogo) ffmpegArgs.push('-i', logoPath);
 
   const filterParts = [];
   let videoStreamLabel = '[0:v]';
   let inputIdx = 2;
 
   // 0. Subtítulos (primero, sobre el video ya alineado con el audio maestro).
-  //    Estilo相同的 al que el usuario aprobó: no cambiar la fuente.
+  //
+  // La FUENTE no se cambia (DejaVu Sans Bold, la que se aprobo).
+  //
+  // Lo unico que se toca es el TAMANO de la letra: de 18 a 15. Con eso una
+  // frase larga ocupa menos alto y el subtitulo deja de comerse media pantalla.
+  //
+  // NO se ponen MarginL/MarginR ni MaxWidth: los margenes laterales recortan las
+  // letras de los extremos (la "T" de "Telescopio" se salia del encuadre), y
+  // MaxWidth cuenta caracteres y no pixeles, asi que no controla el ancho real
+  // en un video vertical. El ancho lo manda el tamano de letra y el Outline.
   if (srtInfo.srtPath) {
     const escapedSrt = srtInfo.srtPath
       .replace(/\\/g, '/')
       .replace(/:/g, '\\:')
       .replace(/'/g, "\\'");
     filterParts.push(
-      `${videoStreamLabel}subtitles='${escapedSrt}':force_style='FontName=DejaVu Sans Bold,FontSize=18,` +
-      `PrimaryColour=&HFFFFFF,OutlineColour=&H000000,BorderStyle=1,Outline=2,Shadow=1,` +
+      `${videoStreamLabel}subtitles='${escapedSrt}':force_style='FontName=DejaVu Sans Bold,FontSize=15,` +
+      `PrimaryColour=&HFFFFFF,OutlineColour=&H000000,BorderStyle=1,Outline=1.8,Shadow=1,` +
       `Alignment=2,MarginV=40'[v_subs]`
     );
     videoStreamLabel = '[v_subs]';
   }
 
   // 1. Robot presentador (overlay esquina inferior derecha)
+  //
+  // El avatar SIEMPRE se dibuja, tenga o no gestos. Los gestos van en otra
+  // posición (esquina superior derecha) y no lo tapan: cuando se.World omitió
+  // para "no duplicar" al robot, lo que se perdió de verdad fue la marca de
+  // agua, que se dibujaba justo donde él estaba.
   if (hasRobot) {
     const robotInputIdx = inputIdx++;
+    ffmpegArgs.push('-i', robotImagePath);
     filterParts.push(`[${robotInputIdx}:v]scale=220:220[robot]`);
     if (brandingMode === 'alternate') {
       filterParts.push(
@@ -463,9 +491,74 @@ export async function renderFinalVideo({
     videoStreamLabel = '[v_robot]';
   }
 
+  // 1b. Gestos de GIR: esquina SUPERIOR derecha, justo debajo de la insignia de
+  // categoría.
+  //
+  // ── Por qué ahí y no en la esquina del avatar ──────────────────────────────
+  // La esquina inferior derecha ya tiene el avatar pequeño, y la superior
+  // izquierda la marca de agua. La categoría va arriba a la derecha (y=60), así
+  // que el hueco libre es justo debajo de ella.
+  //
+  // ── Por qué son opacos sin dejar cuadro negro ─────────────────────────────
+  // El PNG de trae transparencia real (fondo recortado, no pintado). Se escala
+  // y se deja en `format=rgba` para que ffmpeg conserve ese canal alfa: así el
+  // robot llega con su color y solo el fondo es transparente, y se ve el video
+  // de stock detrás.
+  //
+  // Lo que NO hay que hacer es quitarle el alfa (`format=rgb24`): el fondo
+  // transparente se convierte en negro sólido y aparece un cuadro negro
+  // flotando sobre el video.
+  //
+  // ── Tamaño ─────────────────────────────────────────────────────────────────
+  // Un cuarto del largo del video (1920/4 = 480 px de alto), que es lo que se
+  // pidió: lo justo para que se lea qué gesto está haciendo.
+  if (Array.isArray(gestos) && gestos.length) {
+    for (const gesto of gestos) {
+      if (!gesto?.ruta || !fs.existsSync(gesto.ruta)) continue;
+
+      const gIdx = inputIdx++;
+      ffmpegArgs.push('-loop', '1', '-i', gesto.ruta);
+
+      const ini = Number(gesto.ini) || 0;
+      const fin = Number(gesto.fin) || 0;
+      const dur = Math.max(0.4, fin - ini);
+
+      // Un cuarto del largo del video. La pizarra viene en horizontal (677x369), así
+      // que con la misma altura ocuparía casi todo el ancho y taparía el video;
+      // se le da algo menos para que proportione.
+      const ALTO = 480;
+      const alto = gesto.nombre === 'pizarra' ? 360 : 480;
+
+      // `pad` al tamaño exacto y `format=rgb24` (SIN canal alfa) es lo que
+      // hace que la imagen llegue opaca al video. Con `format=rgba` el PNG se
+      // mezclaba con el fondo y el robot se transparentaba.
+      //
+      // El fundido de salida va dentro del MISMO filtro, separado por coma:
+      // `fade=t=in:...,fade=t=out:...`. Si se escribe `fade=t=in:...:fade=t=out`
+      // ffmpeg lo lee como un argumento más del primero y responde
+      // "Option 'fade' not found".
+      filterParts.push(
+        `[${gIdx}:v]scale=-1:${alto},format=rgba,` +
+        `fade=t=in:st=0:d=0.28,fade=t=out:st=${(dur - 0.28).toFixed(2)}:d=0.28[g_${gIdx}]`
+      );
+
+      // Esquina superior derecha, justo debajo de la insignia de categoría
+      // (que va en y=60 y ocupa unos 60 px). El margen de 30 px lo separa del
+      // borde y de la insignia.
+      filterParts.push(
+        `${videoStreamLabel}[g_${gIdx}]overlay=W-w-30:140:` +
+        `enable='between(t,${ini.toFixed(2)},${fin.toFixed(2)})'[v_gesto_${gIdx}]`
+      );
+      videoStreamLabel = `[v_gesto_${gIdx}]`;
+
+      onProgress(`🙋 Gesto: ${gesto.nombre} (${ini.toFixed(1)}s - ${fin.toFixed(1)}s)`);
+    }
+  }
+
   // 2. Marca de agua (logo translúcido en esquina)
   if (hasLogo) {
     const logoInputIdx = inputIdx++;
+    ffmpegArgs.push('-i', logoPath);
     filterParts.push(
       `[${logoInputIdx}:v]scale=150:-1,format=rgba,colorchannelmixer=aa=${watermarkOpacity}[logo]`
     );

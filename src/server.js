@@ -521,7 +521,7 @@ app.post('/api/render-video', async (req, res) => {
       category: category || script.category || '',
       brandingMode: brandingMode || 'watermark_only',
       watermarkPos: watermarkPos || 'top-left',
-      watermarkOpacity: typeof watermarkOpacity === 'number' ? watermarkOpacity : 0.40,
+      watermarkOpacity: typeof watermarkOpacity === 'number' ? watermarkOpacity : 0.90,
       onProgress: (msg) => sendSSE({ type: 'progress', message: msg })
     });
     

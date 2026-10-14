@@ -23,6 +23,7 @@ import { normalizarGuionMexicano } from './lexicon.js';
 import { generateAudioForScript } from './ttsService.js';
 import { findMediaForScenes } from './mediaService.js';
 import { renderFinalVideo, buildRenderScenes } from './videoRenderService.js';
+import { repartirGestos, rutaGesto } from './gestosGir.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -296,7 +297,7 @@ export async function ejecutarPipeline(opts = {}) {
     format = 'noticia_resumida',
     brandingMode = 'watermark_only',
     watermarkPos = 'top-left',
-    watermarkOpacity = 0.40,
+    watermarkOpacity = 0.90,
     jobId = null,
     dryRun = false,
     onProgress = () => {},
@@ -393,7 +394,58 @@ export async function ejecutarPipeline(opts = {}) {
     }
 
     const robotImagePath = path.join(projectRoot, 'public', 'assets', 'robot_host.jpg');
-    const logoPath = path.join(projectRoot, 'public', 'assets', 'logo.jpg');
+    // Logo con fondo TRANSPARENTE (logo.png): es logo.jpg con el turquesa del
+    // fondo recortado, así que en el video se ve solo el disco azul con
+    // "CIENCIA COOL" y el robot, que es como se veía en los videos anteriores.
+    // El disco lo mantiene `public/assets/_logoalpha.cjs` (script de recorte).
+    const logoPath = path.join(projectRoot, 'public', 'assets', 'logo.png');
+
+    // ─── Gestos de GIR ───────────────────────────────────────────────────────
+    // Se eligen sobre las escenas del GUION (donde está el texto y el campo
+    // `gesto` que puede haber pedido Gemini) y luego se traduce a los tiempos
+    // reales del audio, que es donde sabemos cuándo dice cada cosa.
+    //
+    // El desplazamiento se lleva porque cada escena tiene su audio: el
+    // wordBoundaries de la escena 1 empiezan en 0, los de la escena 2 en
+    // (duración de la 1), y así sucesivamente. Sin sumar, todos los gestos
+    // aparecerían al principio del video.
+    const gestosBase = path.join(projectRoot, 'assets', 'gir_gestos');
+    const eleccion = repartirGestos(
+      [
+        script.hook ? { texto: script.hook.narration, gesto: script.hook.gesto } : null,
+        ...(script.scenes || []).map(s => ({ texto: s.narration, gesto: s.gesto })),
+        script.cta ? { texto: script.cta.narration, gesto: script.cta.gesto } : null,
+      ].filter(Boolean),
+      2
+    );
+
+    const gestosConTiempo = [];
+    let tEscena = 0;
+    for (let i = 0; i < scenes.length; i++) {
+      const esc = scenes[i];
+      const nombre = eleccion.get(i);
+      if (nombre) {
+        const ruta = rutaGesto(nombre, gestosBase);
+        if (ruta && fs.existsSync(ruta)) {
+          const bordes = esc.wordBoundaries || [];
+          if (bordes.length) {
+            // El gesto se muestra mientras GIR dice ESA frase, no durante toda
+            // la escena: si dura 10 s y el gesto 4, se nota que no encaja.
+            gestosConTiempo.push({
+              nombre,
+              ruta,
+              ini: tEscena + bordes[0].start,
+              fin: tEscena + bordes.at(-1).end,
+            });
+          }
+        }
+      }
+      tEscena += esc.durationSec || 0;
+    }
+
+    if (gestosConTiempo.length) {
+      log(`🙋 ${gestosConTiempo.length} gesto(s) de GIR: ${gestosConTiempo.map(g => g.nombre).join(', ')}`);
+    }
 
     log(`Renderizando ${scenes.length} escenas...`);
     const resultado = await renderFinalVideo({
@@ -407,6 +459,7 @@ export async function ejecutarPipeline(opts = {}) {
       brandingMode,
       watermarkPos,
       watermarkOpacity,
+      gestos: gestosConTiempo,
       onProgress: log,
   });
 

@@ -2,7 +2,9 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import * as googleTTS from 'google-tts-api';
+import cloudTts from '@google-cloud/text-to-speech';
 import { segmentForSynthesis, findEnglishTerms, aEspanolDeMexico } from './lexicon.js';
+import { textoAPronunciableSsml } from './pronunciation.js';
 import { getMediaDuration, concatAudioFiles, runFfmpeg } from './mediaProbe.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -293,9 +295,335 @@ function prosodyFor(voiceConfig, mode) {
  * y, como último recurso, lo sintetiza con la voz principal para no perder los
  * tiempos de palabra (que son los que sostienen la sincronía de subtítulos).
  */
+/**
+ * ── Cloud Text-to-Speech como motor de respaldo ────────────────────────────
+ *
+ * ── Por qué existe ────────────────────────────────────────────────────────
+ * Edge TTS (msedge-tts) es un servicio NO oficial de Microsoft. El 12 de
+ * octubre de 2026 empezó a devolver 403 desde Cloud Run en todos los
+ * segmentos, y con Edge caído el pipeline se quedó sin voz.
+ *
+ * Cloud TTS es la API oficial de Google: nunca la pueden cortar un martes por
+ * la tarde. Cuesta dinero, pero SOLO se llega aquí si Edge falló, así que
+ * mientras Microsoft siga sirviendo el servicio gratuito no se paga nada.
+ *
+ * ── Tres limitaciones de esta API que el código tiene que esquivar ─────────
+ *
+ * 1. NO da tiempos de palabra. No existe ningún campo para pedirlos (ni en v1
+ *    ni en v1beta1): el campo que la documentación sugiere, "includeWordTime-
+ *    Offsets", la API responde "Unknown name ... Cannot find field". Los
+ *    tiempos por palabra SÍ existen, pero solo en synthesizeLongAudio, que
+ *    exige un archivo de salida en GCS y tarda minutos.
+ *    Para algo de 30 segundos por fragmento es inviable.
+ *
+ *    La salida que sí hay: `enableTimePointing: "SSML_MARK"` con etiquetas
+ *    <mark> en el SSML, que devuelve un timeSeconds por marca. Eso es lo que
+ *    se usa aquí, y de ahí salen los tiempos de los subtítulos.
+ *
+ * 2. Polyglot-1 solo devuelve la PRIMERA marca de cada frase (comprobado: con
+ *    6 palabras seguidas sale 1 solo tiempo). Con marcas separadas dentro de
+ *    la misma <prosody> sí devuelve varias (comprobado: 2 de 2). Por eso cada
+ *    frase se pide por separado: una marca al principio y otra al final, y con
+ *    dos frases consecutivas ya se obtienen todos los instantes que hacen
+ *    falta para colocar cada palabra entre medio.
+ *
+ * 3. El límite por llamada son 200 caracteres de SSML. Los fragmentos llegan
+ *    a 900+, así que además hay que trocear por palabras.
+ *
+ * ── Sobre la voz ──────────────────────────────────────────────────────────
+ * Cloud TTS no tiene voces es-MX (solo es-US y es-ES) ni las multilingües de
+ * Edge. La equivalencia es `Polyglot-1`, que fue creada justamente para hablar
+ * muchos idiomas con el MISMO timbre: reproduce el motivo por el que en su día
+ * se eligieron las voces multilingües de Edge, así que al pasar a inglés la
+ * voz no cambia. El guion sigue siendo mexicano (lo normaliza lexicon.js); lo
+ * único que cambia es el acento con el que Cloud TTS lo pronuncia.
+ */
+const VOZ_CLOUD = {
+  ES: 'es-US-Polyglot-1',
+  EN: 'en-US-Polyglot-1',
+};
+
+/** Elige la voz de Cloud según el idioma del fragmento. */
+function vozCloud(lang) {
+  return String(lang || '').toLowerCase().startsWith('en') ? VOZ_CLOUD.EN : VOZ_CLOUD.ES;
+}
+
+/**
+ * Token de acceso de la cuenta de servicio de la instancia de Cloud Run.
+ *
+ * Se pide a la metadata del servidor en vez de usar la librería de Google para
+ * no arrastrar gRPC y el resto de dependencias: lo único que hace falta es un
+ * portador de OAuth para la API de TTS.
+ *
+ * ── Por qué no vale con el cliente de la librería ──────────────────────────
+ * Porque el campo que devuelve los tiempos de palabra (`enableTimePointing`)
+ * solo existe en v1beta1, y el cliente de Node habla v1. Se podría subir la
+ * librería a v1beta1 con una opción, pero entonces el resto del proyecto
+ * hereda un cliente distinto; unas pocas líneas de fetch son más baratas de
+ * mantener que un cliente duplicado.
+ *
+ * El token caduca a los 55 minutos, así que se cachea y se reutiliza. Un
+ * fragmento de video hace unas 30 llamadas seguidas, así que sin cachear se
+ * pediría un token nuevo para cada una.
+ */
+let tokenCache = { valor: null, expira: 0 };
+
+async function tokenDeCloudRun() {
+  const ahora = Date.now();
+  if (tokenCache.valor && ahora < tokenCache.expira) return tokenCache.valor;
+
+  const meta = process.env.GCE_METADATA_HOST || 'metadata.google.internal';
+  const r = await fetch(
+    `http://${meta}/computeMetadata/v1/instance/service-accounts/default/token`,
+    { headers: { 'Metadata-Flavor': 'Google' } }
+  );
+  if (!r.ok) throw new Error('No se pudo obtener token de la cuenta de servicio: HTTP ' + r.status);
+
+  const j = await r.json();
+  // Se le restan 5 minutos de margen: si el token muere a mitad de un lote de
+  // llamadas, las siguientes fallan con un 401 y el segmento entero se cae.
+  tokenCache = { valor: j.access_token, expira: ahora + (j.expires_in - 300) * 1000 };
+  return tokenCache.valor;
+}
+
+/** Escapa texto para poder meterlo dentro de SSML. */
+function escSsml(t) {
+  return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/** Divide en frases por signos de puntuación, respetando el orden. */
+function frasesDe(texto) {
+  const partes = String(texto)
+    .split(/(?<=[.!?;:,])\s+/u)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return partes.length ? partes : [String(texto).trim()];
+}
+
+/**
+ * Pide UNA frase a Cloud TTS envuelta en marcas y devuelve el audio y el
+ * instante en que empieza y acaba cada palabra.
+ *
+ * Se hace una llamada por frase a propósito: es lo que garantiza que se
+ * obtengan los dos tiempos (inicio y fin) en vez de uno solo. Con ~6 frases por
+ * fragmento son 6 llamadas, cada una de microsegundos: la latencia se nota
+ * mucho menos que el acierto de los subtítulos.
+ */
+async function fraseCloud(client, frase, voiceKey, lang, prosody) {
+  const palabras = frase.split(/\s+/).filter(Boolean);
+  if (!palabras.length) return null;
+
+  // ── Construcción del SSML ────────────────────────────────────────────────
+  // Se compone en tres capas, de fuera adentro:
+  //
+  //   <speak><prosody rate=... pitch=...>   ritmo y tono (mismo control que
+  //                                          llevaba Edge con su <prosody>)
+  //     <mark name="ini">primera palabra</mark>
+  //     ...resto del texto YA CORREGIDO por pronunciacion.js...
+  //     <mark name="fin">última palabra</mark>
+  //   </prosody></speak>
+  //
+  // El módulo de pronunciación devuelve un <speak> completo, así que aquí se
+  // le quita el envoltorio para poder meter las marcas y la prosodía DENTRO.
+  // Es un poco de surgery de cadenas, pero evita que el módulo tenga que saber
+  // nada de marcas ni de prosodía: su único trabajo es dejar el texto bien
+  // leído, y así se puede probar por separado.
+  //
+  // Las marcas van sobre la primera y la última palabra ORIGINAL, no sobre el
+  // texto corregido. Da igual dónde caigan porque lo que se necesita es el
+  // instante en que empieza y acaba la frase, y esos dos puntos están en los
+  // extremos del <prosody> se llame como se llame lo que hay en medio.
+  const corregido = textoAPronunciableSsml(frase, lang).replace(/^<speak>/, '').replace(/<\/speak>$/, '');
+  const ssml =
+    '<speak><prosody rate="' + (prosody?.rate || '+0%') +
+    '" pitch="' + (prosody?.pitch || '+0Hz') + '">' +
+    '<mark name="ini">' + escSsml(palabras[0]) + '</mark>' +
+    corregido +
+    '<mark name="fin">' + escSsml(palabras.at(-1)) + '</mark>' +
+    '</prosody></speak>';
+
+  // No se usa client.synthesizeSpeech() a propósito: la librería llama a la
+  // API v1, y el campo `enableTimePointing` (el único que devuelve los
+  // tiempos) SOLO existe en v1beta1. Con la librería, el audio salía pero
+  // timepoints venía siempre vacío.
+  //
+  // Se autentica con la cuenta de servicio de la instancia de Cloud Run, que
+  // ya está en la metadata: es lo mismo que haría la librería, pero contra
+  // la versión de la API que devuelve lo que hace falta.
+  const token = await tokenDeCloudRun();
+  const resp = await fetch(
+    'https://texttospeech.googleapis.com/v1beta1/text:synthesize',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer ' + token,
+      },
+      body: JSON.stringify({
+        input: { ssml },
+        // El languageCode es solo el idioma ('es-us' / 'en-us'), NO el nombre
+        // de la voz. Cloud TTS los compara en minúsculas y rechaza si no
+        // cuadran, y además rechaza la voz si el idioma no es el suyo.
+        voice: { languageCode: voiceKey.slice(0, 5).toLowerCase(), name: voiceKey },
+        audioConfig: { audioEncoding: 'MP3', sampleRateHertz: 24000 },
+        enableTimePointing: 'SSML_MARK',
+      }),
+    }
+  );
+
+  if (!resp.ok) {
+    const detalle = await resp.text().catch(() => '');
+    throw new Error('HTTP ' + resp.status + ': ' + detalle.slice(0, 220));
+  }
+
+  const json = await resp.json();
+  const audioContent = Buffer.from(json.audioContent || '', 'base64');
+  if (!audioContent.length) throw new Error('audio vacío');
+
+  const tp = json.timepoints || [];
+  // Registro breve: si algún día Cloud deja de devolver los tiempos, el log
+  // dice de inmediato si vinieron vacíos o si llegaron con otro nombre, en vez
+  // de tener que deducirlo de un "sin marca de inicio".
+  if (process.env.DEBUG_TTS === '1' || !tp.length) {
+    console.log(`🔎 TTS cloud: ${tp.length} timepoints · claves=${Object.keys(json).join(',')} · ssml=${ssml.length} car.`);
+  }
+  const ini = tp.find((t) => t.markName === 'ini');
+  const fin = tp.find((t) => t.markName === 'fin');
+  if (!ini) throw new Error('sin marca de inicio');
+
+  // Cloud TTS no da el final de la última palabra cuando la marca cae justo en
+  // el final del audio, así que se usa la duración real del MP3.
+  const dur = await duracionMp3(audioContent);
+  const finFrase = fin ? fin.timeSeconds : (dur != null ? dur : ini.timeSeconds);
+
+  // Las palabras intermedias se reparten a lo largo del hueco entre las dos
+  // marcas, PONDERADAS POR LONGITUD. Es una estimación, pero es la misma que
+  // haría cualquierEstimateador de velocidad de lectura constante, y en
+  // español la longitud predice el tiempo bastante bien. Lo que importa para
+  // que el subtítulo cuadre es que la frase ENTERA empieza y acaba en el
+  // instante correcto, y eso sí es medido, no estimado.
+  const totalChars = palabras.reduce((n, w) => n + w.length, 0) || 1;
+  const span = Math.max(0.01, finFrase - ini.timeSeconds);
+  const boundaries = [];
+  let usado = 0;
+  for (let i = 0; i < palabras.length; i++) {
+    const w = palabras[i];
+    const inicioRel = (usado / totalChars) * span;
+    usado += w.length;
+    const finRel = (usado / totalChars) * span;
+    boundaries.push({
+      start: ini.timeSeconds + inicioRel,
+      end: ini.timeSeconds + finRel,
+      word: w,
+    });
+  }
+  // La última cierra exactamente en la marca final, para que no quede un hueco
+  // entre el fin del subtítulo y el principio del siguiente.
+  if (boundaries.length) {
+    boundaries.at(-1).end = finFrase;
+    boundaries[0].start = ini.timeSeconds;
+  }
+
+  return { audio: audioContent, boundaries };
+}
+
+/**
+ * Sintetiza UN fragmento con Cloud TTS y devuelve los tiempos de palabra.
+ *
+ * El contrato es el mismo que devuelve synthOnce (Edge), así que quien llama
+ * no se entera de qué motor se usó: mismo archivo, mismo array de
+ * wordBoundaries con {start, end, word} en segundos.
+ */
+async function synthSegmentCloud(text, outPath, voiceKey, prosody, lang) {
+  const client = new cloudTts.TextToSpeechClient();
+  const cloudVoice = vozCloud(lang);
+
+  // Límite por llamada. El SSML envuelto (marcas + prosody) suma caracteres, de
+  // ahí el margen sobre 200: las marcas valen por 2 palabras, pero no的一条
+  // línea vacía.
+  const LIMITE = 180;
+
+  // Se trocea por palabras: cortar en mitad de una palabra parte la sílaba en
+  // dos y además deja el tiempo de esa palabra mal medido.
+  const trozos = [];
+  let actual = [];
+  let largo = 0;
+  for (const palabra of String(text).split(/\s+/).filter(Boolean)) {
+    if (largo + palabra.length + 1 > LIMITE && actual.length) {
+      trozos.push(actual.join(' '));
+      actual = [];
+      largo = 0;
+    }
+    actual.push(palabra);
+    largo += palabra.length + 1;
+  }
+  if (actual.length) trozos.push(actual.join(' '));
+  if (!trozos.length) trozos.push(String(text));
+
+  const pieces = [];
+  const boundaries = [];
+  let offset = 0;
+
+  for (const trozo of trozos) {
+    for (const frase of frasesDe(trozo)) {
+      const r = await fraseCloud(client, frase, cloudVoice, lang, prosody);
+      if (!r) continue;
+      pieces.push(r.audio);
+      for (const b of r.boundaries) {
+        boundaries.push({ ...b, start: b.start + offset, end: b.end + offset });
+      }
+      const dur = await duracionMp3(r.audio);
+      offset += dur != null ? dur : 0;
+    }
+  }
+
+  if (!pieces.length) throw new Error('Cloud TTS no devolvió audio');
+
+  // MP3 se concatena byte a byte y sigue siendo reproducible: cada fragmento
+  // lleva su propio encabezado. Unirlo con ffmpeg aquí sería lentísimo para
+  // algo tan simple.
+  fs.writeFileSync(outPath, Buffer.concat(pieces));
+
+  if (!boundaries.length) throw new Error('Cloud TTS no devolvió tiempos de palabra');
+
+  return {
+    success: true,
+    filePath: outPath,
+    filename: path.basename(outPath),
+    url: '/audio/' + path.basename(outPath),
+    engine: 'cloud-tts',
+    voice: cloudVoice,
+    wordBoundaries: boundaries,
+  };
+}
+
+/**
+ * Duración de un MP3 en segundos.
+ *
+ * Se usa ffprobe porque es el mismo motor que ya usa el resto del proyecto y
+ * no hay que estimar a ojo: la duración calculada a ojo es la que descuadra los
+ * subtítulos un poco en cada trozo, y basta de acumuladas.
+ */
+async function duracionMp3(buffer) {
+  const tmp = path.join(audioOutputDir, `.dur_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.mp3`);
+  fs.writeFileSync(tmp, buffer);
+  try {
+    return await getMediaDuration(tmp);
+  } finally {
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch (_) {}
+  }
+}
+
 async function synthSegment(text, outPath, voiceKey, prosody, lang, fallbackVoiceKey) {
   const MIN_BYTES = 1024;
 
+  // ── Motor 1: Edge TTS, GRATIS ────────────────────────────────────────────
+  // Se intenta primero a propósito. Es el servicio que ya usábamos y no cuesta
+  // nada. Si Microsoft levanta el bloqueo (el 12/10/2026 empezó a devolver 403
+  // desde Cloud Run), aquí vuelve a funcionar y no se cobra un céntimo.
+  //
+  // Si falla, se pasa a Cloud TTS en el mismo segmento: preferimos un céntimo
+  // a no tener video. Ver DEBAJO_DE_ESTE_BLOQUE para el detalle.
   for (let attempt = 1; attempt <= 3; attempt++) {
     if (attempt > 1) {
       // Edge no tolera conexiones consecutivas muy rápidas: espera breve.
@@ -308,6 +636,24 @@ async function synthSegment(text, outPath, voiceKey, prosody, lang, fallbackVoic
       console.warn(`⚠️ Segmento vacío (${size} bytes), reintento ${attempt}/3`);
     } catch (err) {
       console.warn(`⚠️ Segmento falló (${err.message}), reintento ${attempt}/3`);
+    }
+  }
+
+  // ── Motor 2: Google Cloud TTS, de pago pero oficial ────────────────────
+  // Edge falló los 3 intentos, así que este fragmento no tiene voz de otra
+  // forma. Aquí se acepta pagar: un céntimo es mejor que un video que no sale.
+  // Solo se llega a este motor si Edge falló, que es lo que mantiene el coste a
+  // cero mientras Microsoft siga sirviendo el servicio gratuito.
+  console.warn('⚠️ Edge TTS no respondió; se usa Cloud TTS (este fragmento sí se cobra).');
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    if (attempt > 1) await new Promise(r => setTimeout(r, 600 * attempt));
+    try {
+      const res = await synthSegmentCloud(text, outPath, voiceKey, prosody, lang);
+      const size = fs.existsSync(outPath) ? fs.statSync(outPath).size : 0;
+      if (size >= MIN_BYTES) return res;
+      console.warn(`⚠️ Cloud TTS devolvió audio vacío (${size} bytes), reintento ${attempt}/2`);
+    } catch (err) {
+      console.warn(`⚠️ Cloud TTS falló (${err.message}), reintento ${attempt}/2`);
     }
   }
 

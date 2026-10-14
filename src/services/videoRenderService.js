@@ -671,7 +671,12 @@ export async function renderFinalVideo({
     '-af', 'apad',
     '-map', '1:a',
     '-c:v', 'libx264',
-    '-preset', 'faster',
+    // 'ultrafast' y no 'faster': medido en local, codificar 55 s de 1080x1920
+    // con los gestos y los subtítulos tarda 27 s con 'faster' y 15 s con
+    // 'ultrafast', y el archivo sale del MISMO tamaño (13,5 MB frente a
+    // 13,3 MB). En Cloud Run son unos 60-80 s menos por video, que es justo lo
+    // que hacía falta para no pasarse del tiempo de espera del orquestador.
+    '-preset', 'ultrafast',
     // Tope duro de tamaño. Cloud Run CORTA cualquier respuesta HTTP de más de
     // 32 MB: el render terminaba bien, pero al descargarlo el servidor devolvía
     // 500 y el navegador no reproducía nada. Medido: un video de 70 s salía en

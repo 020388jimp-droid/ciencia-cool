@@ -311,7 +311,31 @@ async function elegirNoticia({ categoria, topic }) {
   }
 
   const cat = CATEGORIAS_VALIDAS.has(categoria) ? categoria : 'todas';
-  const noticias = await fetchAllNews(cat);
+  let noticias = await fetchAllNews(cat);
+
+  // ── Reintento si la lectura vino floja ────────────────────────────────────
+  // Cloud Run a veces no llega a los feeds: medido en los registros, la misma
+  // petición ha devuelto 331 artículos con 30 feeds OK y, diez segundos
+  // después, 0 artículos con 3 feeds OK. Cuando la lista queda corta, el
+  // servicio ya tiene un refresco en segundo plano que suele completarse
+  // 10-20 s más tarde, así que se fuerza uno y se compara.
+  //
+  // Sin esto, con 10 feeds OK la noticia "más reciente" de tecnología podía ser
+  // una de hacía 13 días, y de ahí salían dos videos seguidos del mismo tema.
+  if (noticias.length < 15) {
+    console.log(`📰 Solo ${noticias.length} candidatas: se reintenta la lectura de feeds`);
+    const reintento = await fetchAllNews(cat, { force: true });
+    if (reintento.length > noticias.length) noticias = reintento;
+  }
+
+  // ── Antigüedad máxima ─────────────────────────────────────────────────────
+  // Una noticia de hace 13 días no es noticia. El límite alto que traía el
+  // servicio (30 días) dejaba pasar cualquier cosa cuando la lista venía
+  // parcial. 3 días cubre de sobra un canal de ciencia que publica a diario.
+  const ANTIGUEDAD_MAXIMA_MS = 3 * 24 * 60 * 60 * 1000;
+  const haceTresDias = Date.now() - ANTIGUEDAD_MAXIMA_MS;
+  const recientes = noticias.filter(n => Number(n.timestamp) >= haceTresDias);
+  const candidatas = recientes.length ? recientes : noticias;
 
   // Titulares ya usados en esta categoría, sacados del bucket (no de la RAM:
   // la RAM se pierde en cada despliegue y eso repetía la noticia del día).
@@ -330,12 +354,23 @@ async function elegirNoticia({ categoria, topic }) {
     };
   }
 
-  const ordenadas = [...noticias].sort((a, b) => b.timestamp - a.timestamp);
+  const ordenadas = [...candidatas].sort((a, b) => b.timestamp - a.timestamp);
 
   // Se descarta todo lo ya usado. Si por lo que sea todo estuviera usado, se
   // vuelve al más reciente: mejor repetir que quedarse sin video.
   const frescas = ordenadas.filter(a => !usadas.includes(a.title));
   const elegida = (frescas.length ? frescas : ordenadas)[0];
+
+  // Traza de por qué se eligió esta noticia. Sin esto, si un día el pipeline
+  // elige una noticia vieja (pasó: dos veces la misma, de 13 días atrás) no hay
+  // forma de distinguir si falló el filtro de "ya usadas" o si la lista de
+  // candidatas venía ya mal desde el servicio de feeds.
+  const ts = (t) => (Number.isFinite(t) ? new Date(t).toISOString().slice(0, 16) : 'sin fecha');
+  console.log(
+    `\u{1F4F0} ${cat}: ${noticias.length} candidatas · ${usadas.length} ya usadas · ` +
+    `la más reciente es "${ordenadas[0]?.title?.slice(0, 40)}" (${ts(ordenadas[0]?.timestamp)}) · ` +
+    `elegida "${elegida?.title?.slice(0, 40)}" (${ts(elegida?.timestamp)})`
+  );
 
   await registrarNoticiaUsada(cat, elegida.title);
 

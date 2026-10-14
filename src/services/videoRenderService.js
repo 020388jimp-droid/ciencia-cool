@@ -521,7 +521,6 @@ export async function renderFinalVideo({
 
       const ini = Number(gesto.ini) || 0;
       const fin = Number(gesto.fin) || 0;
-      const dur = Math.max(0.4, fin - ini);
 
       // Un cuarto del largo del video. La pizarra viene en horizontal (677x369), así
       // que con la misma altura ocuparía casi todo el ancho y taparía el video;
@@ -529,22 +528,36 @@ export async function renderFinalVideo({
       const ALTO = 480;
       const alto = gesto.nombre === 'pizarra' ? 360 : 480;
 
-      // `pad` al tamaño exacto y `format=rgb24` (SIN canal alfa) es lo que
-      // hace que la imagen llegue opaca al video. Con `format=rgba` el PNG se
-      // mezclaba con el fondo y el robot se transparentaba.
-      //
-      // El fundido de salida va dentro del MISMO filtro, separado por coma:
+      // Los dos fundidos van en el MISMO filtro, separados por coma:
       // `fade=t=in:...,fade=t=out:...`. Si se escribe `fade=t=in:...:fade=t=out`
       // ffmpeg lo lee como un argumento más del primero y responde
       // "Option 'fade' not found".
+      //
+      // El fundido se calcula en el RELOJ DEL VIDEO.
+      //
+      // El PNG entra con `-loop 1`, así que su reloj arranca en 0 igual que el
+      // del video: los dos avanzan juntos. Por eso el fundido se escribe con
+      // los tiempos ABSOLUTOS del video (`st=ini` y `st=fin-0.28`) y no con
+      // tiempos relativos al gesto. La versión anterior ponía `st=0` y
+      // `st=duración`, así que TODOS los gestos se desvanecían en los primeros
+      // segundos del video: los que caían después simplemente no se veían
+      // nunca (el último gesto de un video de 60 s no aparecía).
+      //
+      // `alpha=1` es imprescindible: sin él, `fade` funde el COLOR a negro y
+      // deja el rectángulo opaco, que es el cuadro negro que se veía antes. Con
+      // `alpha=1` lo que se desvanece es la transparencia, así que el robot
+      // aparece y desaparece suavemente sobre el video.
       filterParts.push(
         `[${gIdx}:v]scale=-1:${alto},format=rgba,` +
-        `fade=t=in:st=0:d=0.28,fade=t=out:st=${(dur - 0.28).toFixed(2)}:d=0.28[g_${gIdx}]`
+        `fade=t=in:st=${ini.toFixed(2)}:d=0.28:alpha=1,` +
+        `fade=t=out:st=${Math.max(ini + 0.3, fin - 0.28).toFixed(2)}:d=0.28:alpha=1[g_${gIdx}]`
       );
 
       // Esquina superior derecha, justo debajo de la insignia de categoría
       // (que va en y=60 y ocupa unos 60 px). El margen de 30 px lo separa del
-      // borde y de la insignia.
+      // borde y de la insignia. `enable` es lo que abre y cierra la ventana: el
+      // gesto solo existe entre `ini` y `fin`, y fuera de ahí el video de stock
+      // se ve limpio.
       filterParts.push(
         `${videoStreamLabel}[g_${gIdx}]overlay=W-w-30:140:` +
         `enable='between(t,${ini.toFixed(2)},${fin.toFixed(2)})'[v_gesto_${gIdx}]`

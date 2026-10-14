@@ -246,6 +246,63 @@ app.post('/api/pipeline-completo', async (req, res) => {
   const t0 = Date.now();
   const pasos = [];
   try {
+    // ── Modo "publicar un video que YA existe" ───────────────────────────────
+    // Un video se revisa y se aprueba antes de publicarlo. Cuando toca subir
+    // ESE video (no uno nuevo), el flujo de n8n manda su URL y sus metadatos en
+    // `publicarExistente` y el endpoint responde en menos de un segundo con el
+    // MISMO formato de siempre. El nodo de YouTube de n8n recibe exactamente lo
+    // que recibiría tras una generación completa, así que no hay que tocar el
+    // resto del workflow.
+    //
+    //   {"publicarExistente": {
+    //      "url": "https://storage.googleapis.com/<bucket>/ciencia_cool_123.mp4",
+    //      "title": "Adios al segundo extra",
+    //      "description": "…", "hashtags": ["#cienciacool"],
+    //      "category": "tecnologia", "source": "ABC" }}
+    //
+    // Se aceptan solo URLs del bucket de GCS: es lo que garantiza que el video
+    // sigue publicado y que n8n va a descargar algo nuestro.
+    const existente = req.body?.publicarExistente;
+    if (existente && typeof existente === 'object') {
+      const url = String(existente.url || '').trim();
+      if (!url.startsWith('https://storage.googleapis.com/')) {
+        return res.status(400).json({
+          success: false,
+          error: 'publicarExistente.url debe ser una URL de Google Cloud Storage (https://storage.googleapis.com/…).',
+        });
+      }
+
+      const titulo = String(existente.title || 'CIENCIA COOL').slice(0, 100);
+      const descripcion = String(existente.description || titulo);
+      const hashtags = Array.isArray(existente.hashtags) ? existente.hashtags.map(String) : [];
+
+      pasos.push(`Video existente: se omite la generación. Se publica ${url.split('/').pop()}`);
+
+      return res.json({
+        success: true,
+        elapsedSec: 0,
+        steps: pasos,
+        data: {
+          videoUrl: url,
+          videoUrlAbsoluta: url,
+          videoUrlGcs: url,
+          videoFilename: url.split('/').pop(),
+          sizeBytes: Number(existente.sizeBytes) || 0,
+          title: titulo,
+          description: descripcion,
+          caption: existente.caption ? String(existente.caption) : descripcion,
+          hashtags,
+          category: String(existente.category || ''),
+          source: String(existente.source || ''),
+          newsTitle: String(existente.newsTitle || titulo),
+          sceneCount: 0,
+          jobId: req.body?.jobId || null,
+          reutilizado: true,
+          videoExistente: true,
+        },
+      });
+    }
+
     const {
       categoria, topic, voiceId, format,
       brandingMode, watermarkPos, watermarkOpacity,

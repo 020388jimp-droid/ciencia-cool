@@ -23,7 +23,8 @@ import { normalizarGuionMexicano } from './lexicon.js';
 import { generateAudioForScript } from './ttsService.js';
 import { findMediaForScenes } from './mediaService.js';
 import { renderFinalVideo, buildRenderScenes } from './videoRenderService.js';
-import { repartirGestos, rutaGesto } from './gestosGir.js';
+import { repartirGestos, rutaGesto, MAX_GESTOS_POR_VIDEO } from './gestosGir.js';
+import { getMediaDuration } from './mediaProbe.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -410,14 +411,46 @@ export async function ejecutarPipeline(opts = {}) {
     // (duración de la 1), y así sucesivamente. Sin sumar, todos los gestos
     // aparecerían al principio del video.
     const gestosBase = path.join(projectRoot, 'assets', 'gir_gestos');
+
+    // El CTA se llama `callToAction` en el guion normalizado y `cta` en algunos
+    // scripts viejos. Si aquí solo se miraba `cta`, el array se quedaba con una
+    // escena MENOS que el render: la última (el "síguenos") se quedaba sin gesto
+    // y había un desplazamiento de índice. Se miran los dos, en ese orden.
+    const cta = script.callToAction || script.cta || null;
+
+    // MAX_GESTOS_POR_VIDEO (7 = todos los distintos), no 2: con 2 salía un solo
+    // gesto en todo el video y GIR parecía ausente. Ahora hay uno por escena.
     const eleccion = repartirGestos(
       [
         script.hook ? { texto: script.hook.narration, gesto: script.hook.gesto } : null,
         ...(script.scenes || []).map(s => ({ texto: s.narration, gesto: s.gesto })),
-        script.cta ? { texto: script.cta.narration, gesto: script.cta.gesto } : null,
+        cta ? { texto: cta.narration, gesto: cta.gesto } : null,
       ].filter(Boolean),
-      2
+      MAX_GESTOS_POR_VIDEO
     );
+
+    // Duración REAL de cada escena, medida con ffprobe sobre el mp3 que generó
+    // sus tiempos de palabra.
+    //
+    // Antes se acumulaba `esc.durationSec`, que es una ESTIMACIÓN por número de
+    // palabras. La estimación se desvía de la realidad (medido: 3 segundos de
+    // error al final de un video de 54 s), así que los gestos se iban
+    // desplazando escena a escena y el último caía fuera de tiempo. ffprobe da
+    // el mismo valor que usa el render para cortar cada clip, así que ahora
+    // coinciden al milímetro.
+    const audioDir = path.join(projectRoot, 'outputs', 'audio');
+    const durReales = [];
+    for (const esc of scenes) {
+      let d = esc.durationSec || 0;
+      const part = esc.audioPartFilename
+        ? path.join(audioDir, esc.audioPartFilename)
+        : null;
+      if (part && fs.existsSync(part)) {
+        const real = await getMediaDuration(part);
+        if (real && real > 0) d = real;
+      }
+      durReales.push(d);
+    }
 
     const gestosConTiempo = [];
     let tEscena = 0;
@@ -440,7 +473,7 @@ export async function ejecutarPipeline(opts = {}) {
           }
         }
       }
-      tEscena += esc.durationSec || 0;
+      tEscena += durReales[i] || 0;
     }
 
     if (gestosConTiempo.length) {

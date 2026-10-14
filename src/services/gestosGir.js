@@ -19,6 +19,14 @@
 // salir en la 2 aunque matchee, porque dos veces lo mismo es menos efecto que
 // una.
 //
+// ── Presencia: una por escena ───────────────────────────────────────────────
+// Medido en un video real: con tope de 2 gestos salía UNO solo en todo el
+// video, y el robot parecía un sticker que aparece y desaparece. Se subió el
+// tope a 7 (hay 7 gestos distintos) y se añadió un relleno: si una escena no
+// matchea ninguna regla, se le pone el gesto neutro. El efecto es que GIR
+// está gesticulando durante TODO el video, como un presentador, y no como una
+// decoración que asoma.
+//
 // ── Los gestos disponibles ───────────────────────────────────────────────────
 //   senalar        dedo arriba       "ojo", "importante", "clave"
 //   manos_abiertas hombros arriba    "no se sabe", "quizá"
@@ -42,6 +50,15 @@ export const GESTOS = {
 
 /** Gesto por defecto si hubiera que poner alguno pero ninguno encaja. */
 const GESTO_NEUTRO = 'brazos_relajado';
+
+/**
+ * Cuántos gestos puede tener un video.
+ *
+ * Hay 7 gestos distintos y un video tiene entre 4 y 7 escenas, así que con 7
+ * se puede cubrir TODO el video sin repetir ninguno. Es el objetivo: que GIR
+ * esté presente de principio a fin, no que asombre dos veces.
+ */
+export const MAX_GESTOS_POR_VIDEO = 7;
 
 // ── Reglas por palabra clave ─────────────────────────────────────────────────
 //
@@ -111,11 +128,18 @@ export function elegirGesto(escena, usados = new Set()) {
  * fin: si un gesto entra en la escena 3, es porque en ese momento el texto lo
  * pidió, no porque se sorteara al principio.
  *
+ * Tres pasadas:
+ *   1. Lo que el guion pide explícitamente (manda sobre todo).
+ *   2. Lo que deducen las palabras clave, sin repetir gesto.
+ *   3. Relleno con el gesto neutro para que ninguna escena se quede sin robot.
+ *      Nunca repite el gesto de la escena anterior: dos escenas seguidas con la
+ *      misma pose se lee como una imagen congelada, no como un movimiento.
+ *
  * @param {Array} escenas    Escenas del guion.
  * @param {number} maximo    Cuántos gestos se permiten en todo el video.
  * @returns {Map<number,string>} Escena (índice) -> gesto.
  */
-export function repartirGestos(escenas, maximo = 2) {
+export function repartirGestos(escenas, maximo = MAX_GESTOS_POR_VIDEO) {
   const asignados = new Map();
   const usados = new Set();
   if (!Array.isArray(escenas) || !escenas.length) return asignados;
@@ -137,6 +161,21 @@ export function repartirGestos(escenas, maximo = 2) {
       asignados.set(i, g);
       usados.add(g);
     }
+  }
+
+  // Tercer pase: relleno. Ninguna escena se queda sin GIR. Se evita repetir el
+  // gesto de la escena anterior para que el conjunto se lea como movimiento, y
+  // se prefiere el gesto neutro (brazos relajados): es el que vale para
+  // cualquier frase, incluido el "síguenos" del final, donde una pose triste
+  // desentona.
+  for (let i = 0; i < escenas.length && asignados.size < maximo; i++) {
+    if (asignados.has(i)) continue;
+    const anterior = asignados.get(i - 1);
+    const candidato = [GESTO_NEUTRO, ...Object.keys(GESTOS)].find(
+      (k) => k !== anterior && !usados.has(k)
+    ) || GESTO_NEUTRO;
+    asignados.set(i, candidato);
+    usados.add(candidato);
   }
 
   return asignados;

@@ -87,10 +87,118 @@ const CATEGORIAS_VALIDAS = new Set([
 // Rotación de categorías, para que una tanda cubra todas sin repetir la misma.
 const ROTACION = ['astronomia', 'ciencia', 'tecnologia', 'medio_ambiente', 'medicina', 'videojuegos'];
 
-// Recuerda la última noticia usada en cada categoría para no repetirla mañana.
-// Vive en memoria porque el disco de Cloud Run es efímero: si la instancia se
-// reinicia se empieza de cero, que es un fallo aceptable.
-const ultimaNoticia = {};
+// ─── Noticias ya usadas, persistidas en Cloud Storage ───────────────────────
+//
+// Antes esto vivía en una variable del proceso. Cloud Run es EFÍMERO: cada
+// vez que se despliega una versión (y son varias al día mientras se ajusta
+// algo) la instancia arranca de cero y el pipeline volvía a elegir la noticia
+// más reciente del feed, que es la misma de ayer. Eso es lo que hizo que se
+// publicara dos veces "Adiós al segundo extra".
+//
+// Ahora la lista se guarda en el bucket, en estado/noticias-usadas.json, y
+// sobrevive a reinicios, despliegues y escalados.
+const RUTA_ESTADO = 'estado/noticias-usadas.json';
+
+// Cuántos titulares se recuerdan por categoría. 40 son ~2-3 semanas de video
+// diario: suficiente para no repetir, y el archivo sigue siendo diminuto.
+const MAX_RECUERDO = 40;
+
+// Espejo en memoria: evita ir a por el archivo dos veces en el mismo proceso.
+let estadoEnMemoria = null;
+
+/** Descarga el estado de noticias usadas. Si no existe, devuelve uno vacío. */
+async function descargarEstado() {
+  try {
+    const [contenido] = await storage.bucket(BUCKET).file(RUTA_ESTADO).download();
+    const estado = JSON.parse(contenido.toString('utf8'));
+    if (!estado || typeof estado !== 'object' || !estado.porCategoria) return { porCategoria: {} };
+    return estado;
+  } catch (error) {
+    // 404 es lo normal la primera vez: el archivo todavía no existe.
+    if (error.code !== 404) {
+      console.error('No se pudo leer el estado de noticias usadas:', error.message);
+    }
+    return { porCategoria: {} };
+  }
+}
+
+/** Guarda el estado de noticias usadas en el bucket. */
+async function subirEstado(estado) {
+  await storage.bucket(BUCKET).file(RUTA_ESTADO).save(
+    JSON.stringify(estado, null, 2),
+    { contentType: 'application/json', resumable: false }
+  );
+}
+
+/**
+ * Marca un titular como usado en su categoría.
+ *
+ * Se vuelve a descargar el archivo antes de escribir: si hay otra instancia
+ * corriendo a la vez (Cloud Run escala sola), así no se pisa lo suyo.
+ */
+async function registrarNoticiaUsada(categoria, titulo) {
+  if (!categoria || !titulo) return;
+  try {
+    const estado = await descargarEstado();
+    const lista = Array.isArray(estado.porCategoria[categoria])
+      ? estado.porCategoria[categoria]
+      : [];
+    // El más reciente primero.
+    estado.porCategoria[categoria] = [titulo, ...lista.filter(t => t !== titulo)].slice(0, MAX_RECUERDO);
+    estado.actualizado = new Date().toISOString();
+    await subirEstado(estado);
+    estadoEnMemoria = estado;
+  } catch (error) {
+    // Un fallo aquí no debe tumbar el video: se sigue con la memoria del proceso.
+    console.error('No se pudo guardar la noticia como usada:', error.message);
+  }
+}
+
+/**
+ * Titulares ya usados en una categoría (los más recientes primero).
+ */
+async function noticiasUsadas(categoria) {
+  if (!estadoEnMemoria) estadoEnMemoria = await descargarEstado();
+  const lista = estadoEnMemoria?.porCategoria?.[categoria];
+  return Array.isArray(lista) ? lista : [];
+}
+
+/**
+ * Borra del bucket todos los videos menos el que se indica.
+ *
+ * ── Por qué ─────────────────────────────────────────────────────────────────
+ * Cada render deja un MP4 de 13-21 MB. Con uno al día son 21 vídeos y 333 MB
+ * en una semana de pruebas. El coste es ínfimo (0,13 pesos al mes), pero
+ * ensucia y obliga a mirar qué es cada archivo. La regla es la acordada: solo
+ * vive el último video, que es el que está publicado o a punto de publicarse.
+ *
+ * @param {string} conservar  Nombre del archivo que se acaba de subir.
+ */
+async function borrarVideosAntiguos(conservar) {
+  try {
+    const [archivos] = await storage.bucket(BUCKET).getFiles({ prefix: 'ciencia_cool_' });
+    const sobran = archivos
+      .map(f => f.name)
+      .filter(n => n.endsWith('.mp4') && n !== conservar);
+
+    if (!sobran.length) return 0;
+
+    // Se borran una a una y sin `await` encadenado: si uno falla (permisos,
+    // que otro proceso lo esté borrando), se sigue con los demás.
+    await Promise.all(sobran.map(nombre =>
+      storage.bucket(BUCKET).file(nombre).delete().catch(err =>
+        console.error(`No se pudo borrar ${nombre}:`, err.message)
+      )
+    ));
+
+    console.log(`🧹 ${sobran.length} video(s) antiguo(s) borrados de Cloud; se conserva ${conservar}`);
+    return sobran.length;
+  } catch (error) {
+    console.error('No se pudo limpiar la lista de videos antiguos:', error.message);
+    return 0;
+  }
+}
+
 let indiceRotacion = 0;
 
 // ─── Control de concurrencia ────────────────────────────────────────────────
@@ -205,6 +313,10 @@ async function elegirNoticia({ categoria, topic }) {
   const cat = CATEGORIAS_VALIDAS.has(categoria) ? categoria : 'todas';
   const noticias = await fetchAllNews(cat);
 
+  // Titulares ya usados en esta categoría, sacados del bucket (no de la RAM:
+  // la RAM se pierde en cada despliegue y eso repetía la noticia del día).
+  const usadas = await noticiasUsadas(cat);
+
   if (!noticias.length) {
     // Sin noticias no hay contexto, pero el pipeline puede seguir con un tema
     // genérico: peor un video flojo que un día sin publicar.
@@ -219,11 +331,13 @@ async function elegirNoticia({ categoria, topic }) {
   }
 
   const ordenadas = [...noticias].sort((a, b) => b.timestamp - a.timestamp);
-  const anterior = ultimaNoticia[cat];
-  const elegida = (anterior && ordenadas.length > 1)
-    ? (ordenadas.find(a => a.title !== anterior) || ordenadas[0])
-    : ordenadas[0];
-  ultimaNoticia[cat] = elegida.title;
+
+  // Se descarta todo lo ya usado. Si por lo que sea todo estuviera usado, se
+  // vuelve al más reciente: mejor repetir que quedarse sin video.
+  const frescas = ordenadas.filter(a => !usadas.includes(a.title));
+  const elegida = (frescas.length ? frescas : ordenadas)[0];
+
+  await registrarNoticiaUsada(cat, elegida.title);
 
   return {
     topic: elegida.title,
@@ -509,6 +623,13 @@ export async function ejecutarPipeline(opts = {}) {
       : null;
     if (urlGcs) {
       log(`Video disponible en GCS: ${urlGcs}`);
+
+      // Limpieza: en el bucket solo se queda ESTE video. Los anteriores ya
+      // están publicados (o eran pruebas), así que no hacen falta. Si algo
+      // falla aquí no se para nada: el video ya está subido y publicado.
+      paso = Date.now();
+      const borrados = await borrarVideosAntiguos(resultado.filename);
+      if (borrados) marcar('limpieza de Cloud', paso);
     } else {
       log('No se pudo subir a GCS; se devuelve la URL de Cloud Run (temporal).');
     }

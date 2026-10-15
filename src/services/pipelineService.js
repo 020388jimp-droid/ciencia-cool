@@ -25,6 +25,7 @@ import { findMediaForScenes } from './mediaService.js';
 import { renderFinalVideo, buildRenderScenes } from './videoRenderService.js';
 import { repartirGestos, rutaGesto, MAX_GESTOS_POR_VIDEO } from './gestosGir.js';
 import { getMediaDuration } from './mediaProbe.js';
+import { obtenerTendenciasMX, ordenarPorTendencia } from './tendenciasService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -102,6 +103,12 @@ const RUTA_ESTADO = 'estado/noticias-usadas.json';
 // Cuántos titulares se recuerdan por categoría. 40 son ~2-3 semanas de video
 // diario: suficiente para no repetir, y el archivo sigue siendo diminuto.
 const MAX_RECUERDO = 40;
+// ─── Fase 2: elegir la noticia por tendencia ─────────────────────────────────
+//
+// Poniendo USAR_TENDENCIAS en false se vuelve al comportamiento anterior (la
+// mas reciente). Si Google Trends deja de responder el pipeline tampoco se
+// entera: el servicio de tendencias devuelve lista vacia y se elige por recencia.
+const USAR_TENDENCIAS = process.env.USAR_TENDENCIAS !== 'false';
 
 // Espejo en memoria: evita ir a por el archivo dos veces en el mismo proceso.
 let estadoEnMemoria = null;
@@ -359,7 +366,26 @@ async function elegirNoticia({ categoria, topic }) {
   // Se descarta todo lo ya usado. Si por lo que sea todo estuviera usado, se
   // vuelve al más reciente: mejor repetir que quedarse sin video.
   const frescas = ordenadas.filter(a => !usadas.includes(a.title));
-  const elegida = (frescas.length ? frescas : ordenadas)[0];
+  const disponibles = frescas.length ? frescas : ordenadas;
+
+  // Fase 2: de las candidatas disponibles se elige la mas CALIENTE, no la mas
+  // reciente. "Caliente" = cuantos medios la cubren + si toca una busqueda en
+  // tendencia en Mexico (Google Trends) + lo reciente que sea.
+  let elegida = null;
+  let razon = 'la mas reciente';
+  if (USAR_TENDENCIAS) {
+    try {
+      const tendencias = await obtenerTendenciasMX();
+      const [mejor] = ordenarPorTendencia(disponibles, tendencias);
+      if (mejor) {
+        elegida = mejor.noticia;
+        razon = 'tendencia (' + mejor.motivos.join(', ') + ')';
+      }
+    } catch (error) {
+      console.warn('⚠️ No se pudo ordenar por tendencia; se usa la mas reciente:', error.message);
+    }
+  }
+  if (!elegida) elegida = disponibles[0];
 
   // Traza de por qué se eligió esta noticia. Sin esto, si un día el pipeline
   // elige una noticia vieja (pasó: dos veces la misma, de 13 días atrás) no hay
@@ -369,7 +395,7 @@ async function elegirNoticia({ categoria, topic }) {
   console.log(
     `\u{1F4F0} ${cat}: ${noticias.length} candidatas · ${usadas.length} ya usadas · ` +
     `la más reciente es "${ordenadas[0]?.title?.slice(0, 40)}" (${ts(ordenadas[0]?.timestamp)}) · ` +
-    `elegida "${elegida?.title?.slice(0, 40)}" (${ts(elegida?.timestamp)})`
+    `elegida "${elegida?.title?.slice(0, 40)}" (${ts(elegida?.timestamp)}) [${razon}]`
   );
 
   await registrarNoticiaUsada(cat, elegida.title);

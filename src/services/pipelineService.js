@@ -208,6 +208,29 @@ async function borrarVideosAntiguos(conservar) {
 
 let indiceRotacion = 0;
 
+/**
+ * Devuelve la siguiente categoría de la rotación y lo guarda.
+ *
+ * El contador vive en el mismo archivo de estado que las noticias usadas.
+ * Si se quedara en memoria, cada reinicio de la instancia volvería a empezar
+ * por "astronomia" y con 3 videos al día se repetiría categoría.
+ */
+async function siguienteCategoria() {
+  try {
+    const estado = await descargarEstado();
+    const n = Number(estado.rotacion) || 0;
+    estado.rotacion = n + 1;
+    await subirEstado(estado);
+    indiceRotacion = estado.rotacion;
+    estadoEnMemoria = estado;
+    return ROTACION[n % ROTACION.length];
+  } catch (error) {
+    // Si el bucket falla, se rota igualmente en memoria: algo es mejor que nada.
+    console.error('No se pudo guardar la rotacion; se rota solo en memoria:', error.message);
+    return ROTACION[indiceRotacion++ % ROTACION.length];
+  }
+}
+
 // ─── Control de concurrencia ────────────────────────────────────────────────
 //
 // Medido en producción: un pipeline en solitario tarda ~165 s, pero TRES a la vez
@@ -524,7 +547,7 @@ export async function ejecutarPipeline(opts = {}) {
 
     // ── 1. Noticia ────────────────────────────────────────────────────────────
     let paso = Date.now();
-    const catElegida = categoria || ROTACION[indiceRotacion++ % ROTACION.length];
+    const catElegida = categoria || await siguienteCategoria();
     log(`Categoría: ${catElegida}${topic ? ' (tema explícito)' : ''}`);
     const noticia = await elegirNoticia({ categoria: catElegida, topic });
     log(`Noticia: ${noticia.newsTitle || noticia.topic}`);

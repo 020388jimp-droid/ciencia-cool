@@ -26,6 +26,7 @@ import { renderFinalVideo, buildRenderScenes } from './videoRenderService.js';
 import { repartirGestos, rutaGesto, MAX_GESTOS_POR_VIDEO } from './gestosGir.js';
 import { getMediaDuration } from './mediaProbe.js';
 import { obtenerTendenciasMX, ordenarPorTendencia } from './tendenciasService.js';
+import { elegirNoRepetida } from './dedupService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -168,6 +169,20 @@ async function noticiasUsadas(categoria) {
   if (!estadoEnMemoria) estadoEnMemoria = await descargarEstado();
   const lista = estadoEnMemoria?.porCategoria?.[categoria];
   return Array.isArray(lista) ? lista : [];
+}
+
+/**
+ * Titulares ya usados en CUALQUIER categoria.
+ *
+ * La misma noticia puede aparecer un dia clasificada como "tecnologia" y al
+ * siguiente como "ciencia": el clasificador opera por palabras. Si el filtro
+ * de repeticion solo mira la categoria actual, esa noticia se cuela por la otra
+ * puerta (paso con la del segundo intercalar).
+ */
+async function noticiasUsadasGlobales() {
+  if (!estadoEnMemoria) estadoEnMemoria = await descargarEstado();
+  const porCat = estadoEnMemoria?.porCategoria || {};
+  return Object.values(porCat).flat();
 }
 
 /**
@@ -369,7 +384,8 @@ async function elegirNoticia({ categoria, topic }) {
 
   // Titulares ya usados en esta categoría, sacados del bucket (no de la RAM:
   // la RAM se pierde en cada despliegue y eso repetía la noticia del día).
-  const usadas = await noticiasUsadas(cat);
+  // Se comprueba contra TODO lo usado, no solo contra esta categoria.
+  const usadas = await noticiasUsadasGlobales();
 
   if (!noticias.length) {
     // Sin noticias no hay contexto, pero el pipeline puede seguir con un tema
@@ -399,10 +415,14 @@ async function elegirNoticia({ categoria, topic }) {
   if (USAR_TENDENCIAS) {
     try {
       const tendencias = await obtenerTendenciasMX();
-      const [mejor] = ordenarPorTendencia(disponibles, tendencias);
-      if (mejor) {
-        elegida = mejor.noticia;
-        razon = 'tendencia (' + mejor.motivos.join(', ') + ')';
+     const ranking = ordenarPorTendencia(disponibles, tendencias).map(r => r.noticia);
+
+      // Se recorre el ranking de arriba abajo y se descarta lo que ya este
+      // publicado, aunque el titular sea distinto (mismo hecho, otro medio).
+      const elegidaFinal = await elegirNoRepetida(ranking, usadas);
+      if (elegidaFinal?.noticia) {
+        elegida = elegidaFinal.noticia;
+        razon = 'tendencia (' + elegidaFinal.motivo + ')';
       }
     } catch (error) {
       console.warn('⚠️ No se pudo ordenar por tendencia; se usa la mas reciente:', error.message);

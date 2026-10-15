@@ -1,6 +1,17 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import dotenv from 'dotenv';
 
+// Modelos que funcionan con esta clave, en orden de preferencia.
+// Tambien los usa el filtro anti-repeticion (dedupService): asi no se
+// duplica la lista ni se cuela un nombre que devuelve error.
+export const MODELOS_GEMINI = [
+  'gemini-3.5-flash',
+  'gemini-3.5-flash-lite',
+  'gemini-3.1-flash-lite',
+  'gemini-3-flash-preview',
+  'gemini-flash-latest',
+];
+
 dotenv.config();
 
 export async function generateScriptWithGemini({ topic, newsContext, format = 'noticia_resumida', personality = 'asistente' }) {
@@ -177,13 +188,7 @@ Genera el guion en JSON estricto:`;
   const genAI = new GoogleGenerativeAI(apiKey);
 
   // Lista de modelos activos ordenados por estabilidad y velocidad
-  const modelsToTry = [
-    'gemini-3.5-flash',
-    'gemini-3.5-flash-lite',
-    'gemini-3.1-flash-lite',
-    'gemini-3-flash-preview',
-    'gemini-flash-latest'
-  ];
+  const modelsToTry = MODELOS_GEMINI;
 
   for (const modelName of modelsToTry) {
     try {

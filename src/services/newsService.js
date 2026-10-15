@@ -1,4 +1,5 @@
 import Parser from 'rss-parser';
+import { Storage } from '@google-cloud/storage';
 import { RSS_FEEDS } from '../config/feeds.js';
 
 const parser = new Parser({
@@ -327,6 +328,56 @@ export function isProbablySpanish(text) {
 //
 //  4. CACHÉ: el endpoint responde al instante desde memoria y refresca aparte.
 const CACHE_TTL_MS = 5 * 60 * 1000;
+// ─── Snapshot de noticias en Cloud Storage ─────────────────────────────────
+//
+// Cloud Run es efimero: una instancia nueva arranca con la cache VACIA. Si
+// justo ese dia los feeds no responden (medido: 29 de 30 feeds en timeout), el
+// pipeline se queda con 10-25 articulos y la eleccion de noticia empeora mucho.
+//
+// La solucion es guardar en el bucket el ultimo lote BUENO y usarlo como
+// semilla cuando la lectura viene floja. Asi un dia malo de feeds se parece a
+// un dia normal en vez de a un dia sin noticias.
+const BUCKET_NOTICIAS = 'ciencia-cool-videos-271857970093';
+const RUTA_SNAPSHOT = 'estado/noticias-snapshot.json';
+const storageNoticias = new Storage();
+
+/** Ultimo lote bueno de noticias guardado en el bucket. [] si no hay. */
+async function leerSnapshot() {
+  try {
+    const [contenido] = await storageNoticias.bucket(BUCKET_NOTICIAS).file(RUTA_SNAPSHOT).download();
+    const datos = JSON.parse(contenido.toString('utf8'));
+    if (Array.isArray(datos?.articles)) return datos.articles;
+  } catch (error) {
+    // 404 es lo normal la primera vez. Cualquier otro error: se sigue sin snapshot.
+    if (error.code !== 404) console.error('No se pudo leer el snapshot de noticias:', error.message);
+  }
+  return [];
+}
+
+/**
+ * Guarda el lote como snapshot. No lanza nunca: es una red de seguridad, si
+ * falla no debe enterarse nadie.
+ */
+async function guardarSnapshot(articles) {
+  try {
+    // Solo los campos que hacen falta, y acotado: el archivo tiene que seguir
+    // siendo pequenno aunque los feeds den miles de articulos.
+    const utiles = articles.slice(0, 400).map(a => ({
+      title: a.title,
+      snippet: a.snippet,
+      source: a.source,
+      timestamp: a.timestamp,
+      category: a.category,
+      link: a.link,
+    }));
+    await storageNoticias.bucket(BUCKET_NOTICIAS).file(RUTA_SNAPSHOT).save(
+      JSON.stringify({ at: Date.now(), articles: utiles }),
+      { contentType: 'application/json', resumable: false }
+    );
+  } catch (error) {
+    console.error('No se pudo guardar el snapshot de noticias:', error.message);
+  }
+}
 const MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const FEED_TIMEOUT_MS = 8000;
 const CONCURRENCY = 10;
@@ -463,7 +514,7 @@ async function readFeed(feed) {
  * Descarga todos los feeds EN PARALELO con concurrencia limitada.
  * Los hosts bajo circuit breaker se saltan sin gastar tiempo.
  */
-async function fetchFeedsFresh() {
+async function fetchFeedsFresh(previas = []) {
   const now = Date.now();
   const collected = [];
   let ok = 0;
@@ -530,7 +581,7 @@ async function fetchFeedsFresh() {
   const merged = new Map();
   for (const art of collected) merged.set(art.title.toLowerCase().trim(), art);
   let preserved = 0;
-  for (const art of cache.articles) {
+  for (const art of previas) {
     const key = art.title.toLowerCase().trim();
     if (!merged.has(key) && (now - art.timestamp) <= MAX_AGE_MS) {
       merged.set(key, art);
@@ -545,9 +596,26 @@ async function fetchFeedsFresh() {
 /** Refresca la caché una sola vez a la vez. */
 async function refreshCache() {
   try {
-    const { articles, ok, fail, preserved, discardedEN } = await fetchFeedsFresh();
+    // Semilla: lo que haya en memoria y, si viene floja (instancia nueva que
+    // arranca de cero), el ultimo lote bueno guardado en el bucket.
+    let previas = cache.articles;
+    if (previas.length < 40) {
+      const snapshot = await leerSnapshot();
+      if (snapshot.length >= previas.length) {
+        previas = snapshot;
+        console.log(`🗄️ Semilla desde el snapshot de Cloud: ${snapshot.length} articulos`);
+      }
+    }
+
+    const { articles, ok, fail, preserved, discardedEN } = await fetchFeedsFresh(previas);
     cache = { at: Date.now(), articles, feedsOk: ok, feedsFail: fail, discardedEN };
     console.log(`📰 Noticias actualizadas: ${articles.length} articulos (feeds ok=${ok} fail=${fail}, preservados=${preserved}, descartados_EN=${discardedEN})`);
+
+    // Se guarda como snapshot si el lote es bueno. Con lotes flojos no tiene
+    // sentido sobrescribir uno bueno por uno peor.
+    if (articles.length >= 80) {
+      guardarSnapshot(articles);
+    }
   } catch (error) {
     console.error('Fallo refrescando noticias:', error.message);
   } finally {

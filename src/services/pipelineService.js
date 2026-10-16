@@ -196,12 +196,22 @@ async function noticiasUsadasGlobales() {
  *
  * @param {string} conservar  Nombre del archivo que se acaba de subir.
  */
-async function borrarVideosAntiguos(conservar) {
+async function borrarVideosAntiguos(conservar, { soloMasViejosQueDias = 0 } = {}) {
   try {
     const [archivos] = await storage.bucket(BUCKET).getFiles({ prefix: 'ciencia_cool_' });
+    const limite = soloMasViejosQueDias
+      ? Date.now() - soloMasViejosQueDias * 24 * 60 * 60 * 1000
+      : Infinity;
+
     const sobran = archivos
-      .map(f => f.name)
-      .filter(n => n.endsWith('.mp4') && n !== conservar);
+      .filter(f => f.name.endsWith('.mp4') && f.name !== conservar)
+      .filter(f => {
+        if (limite === Infinity) return true;
+        const creado = Date.parse(f.metadata?.timeCreated || '') || 0;
+        // Sin fecha fiable no se borra: mejor que sobre a que falte.
+        return creado > 0 && creado < limite;
+      })
+      .map(f => f.name);
 
     if (!sobran.length) return 0;
 
@@ -218,6 +228,50 @@ async function borrarVideosAntiguos(conservar) {
   } catch (error) {
     console.error('No se pudo limpiar la lista de videos antiguos:', error.message);
     return 0;
+  }
+}
+
+/**
+ * Borra del bucket todos los videos MENOS el más reciente.
+ *
+ * Se llama al final del flujo de n8n, cuando el video ya se publicó en todas
+ * las redes. Conserva el que se acaba de publicar y borra los de generaciones
+ * anteriores, que ya están publicados.
+ *
+ * Antes el borrado lo hacía el propio pipeline nada más generar. Se cambió
+ * porque con varias redes eso es demasiado pronto: si el video se borra y la
+ * subida a Instagram falla un minuto después, habría que volver a generar el
+ * video entero (3 minutos de ffmpeg y Gemini) para reintentar.
+ *
+ * @returns {Promise<{borrados: string[], conservado: string|null, error?: string}>}
+ */
+export async function limpiarVideosPublicados() {
+  try {
+    const [archivos] = await storage.bucket(BUCKET).getFiles({ prefix: 'ciencia_cool_' });
+    const fecha = (f) => Date.parse(f.metadata?.timeCreated || '') || 0;
+
+    const videos = archivos
+      .filter(f => f.name.endsWith('.mp4'))
+      .sort((a, b) => fecha(a) - fecha(b));
+
+    if (videos.length <= 1) {
+      return { borrados: [], conservado: videos[0]?.name || null };
+    }
+
+    const conservado = videos[videos.length - 1].name;
+    const sobran = videos.slice(0, -1).map(f => f.name);
+
+    await Promise.all(sobran.map(nombre =>
+      storage.bucket(BUCKET).file(nombre).delete().catch(err =>
+        console.error(`No se pudo borrar ${nombre}:`, err.message)
+      )
+    ));
+
+    console.log(`🧹 Publicado en todas las redes: ${sobran.length} video(s) borrado(s); se conserva ${conservado}`);
+    return { borrados: sobran, conservado };
+  } catch (error) {
+    console.error('No se pudo limpiar los videos publicados:', error.message);
+    return { borrados: [], conservado: null, error: error.message };
   }
 }
 
@@ -506,6 +560,8 @@ function construirPublicacion(script, noticia) {
  * @param {number} [opts.watermarkOpacity]
  * @param {string} [opts.jobId]            si se repite, devuelve el resultado anterior
  * @param {boolean} [opts.dryRun]          valida y devuelve el plan sin generar nada
+ * @param {boolean} [opts.borrarAnteriores] borra ya los videos anteriores (por defecto
+ *                                          no: se borran al publicar, ver publicado-y-limpiar)
  * @param {(msg: string) => void} [opts.onProgress]
  */
 export async function ejecutarPipeline(opts = {}) {
@@ -519,6 +575,10 @@ export async function ejecutarPipeline(opts = {}) {
     watermarkOpacity = 0.90,
     jobId = null,
     dryRun = false,
+    // Por defecto NO se borran los videos anteriores al generar: el video se
+    // queda en el bucket hasta que n8n confirma que se publicó en todas las
+    // redes (ahí se llama a /api/publicado-y-limpiar, que sí los borra).
+    borrarAnteriores = false,
     onProgress = () => {},
   } = opts;
 
@@ -728,11 +788,19 @@ export async function ejecutarPipeline(opts = {}) {
     if (urlGcs) {
       log(`Video disponible en GCS: ${urlGcs}`);
 
-      // Limpieza: en el bucket solo se queda ESTE video. Los anteriores ya
-      // están publicados (o eran pruebas), así que no hacen falta. Si algo
-      // falla aquí no se para nada: el video ya está subido y publicado.
+      // Limpieza. Antes se borraba AQUÍ, nada más generar. Ahora el video se
+      // queda en el bucket hasta que n8n confirma que se publicó en TODAS las
+      // redes: si se borrase aquí y la subida a Instagram fallara un minuto
+      // después, habría que volver a generar el video entero para reintentar.
+      //
+      //   borrarAnteriores: true -> solo queda este video (como antes)
+      //   sin la opción (normal)  -> solo se barren los videos de más de 3
+      //                             días, por si el flujo se queda a medias y
+      //                             se van acumulando
       paso = Date.now();
-      const borrados = await borrarVideosAntiguos(resultado.filename);
+      const borrados = borrarAnteriores
+        ? await borrarVideosAntiguos(resultado.filename)
+        : await borrarVideosAntiguos(resultado.filename, { soloMasViejosQueDias: 3 });
       if (borrados) marcar('limpieza de Cloud', paso);
     } else {
       log('No se pudo subir a GCS; se devuelve la URL de Cloud Run (temporal).');

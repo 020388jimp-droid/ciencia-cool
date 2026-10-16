@@ -14,7 +14,7 @@ import { saveScript } from './services/storageService.js';
 import { generateAudioForScript, AVAILABLE_VOICES, DEFAULT_VOICE_ID } from './services/ttsService.js';
 import { findMediaForScenes } from './services/mediaService.js';
 import { renderFinalVideo, buildRenderScenes } from './services/videoRenderService.js';
-import { ejecutarPipeline, estadoPipeline } from './services/pipelineService.js';
+import { ejecutarPipeline, estadoPipeline, limpiarVideosPublicados } from './services/pipelineService.js';
 
 dotenv.config();
 
@@ -306,7 +306,7 @@ app.post('/api/pipeline-completo', async (req, res) => {
     const {
       categoria, topic, voiceId, format,
       brandingMode, watermarkPos, watermarkOpacity,
-      jobId, dryRun,
+      jobId, dryRun, borrarAnteriores,
     } = req.body || {};
 
     const etiqueta = jobId ? ` · job ${jobId}` : '';
@@ -317,6 +317,7 @@ app.post('/api/pipeline-completo', async (req, res) => {
       brandingMode, watermarkPos, watermarkOpacity,
       jobId: jobId || null,
       dryRun: dryRun === true,
+      borrarAnteriores: borrarAnteriores === true,
       onProgress: (msg) => {
         pasos.push(msg);
         console.log(`   ${msg}`);
@@ -375,6 +376,46 @@ app.post('/api/pipeline-completo', async (req, res) => {
       error: error.message,
       steps: pasos,
     });
+  }
+});
+
+// ── Publicado en TODAS las redes: ahora sí se pueden borrar los anteriores ──
+//
+// Va al FINAL del flujo de n8n, después de subir a YouTube, Instagram, Facebook
+// y TikTok. Deja en el bucket solo el video más reciente (el que se acaba de
+// publicar) y borra los de generaciones anteriores.
+//
+// ¿Por qué aquí y no al generar? Porque entre generar y publicar en la última
+// red pasan minutos. Si el video se borrara al generarlo y la subida a
+// Instagram fallara, ya no estaría en el bucket para reintentar: habría que
+// volver a generar el video entero (3 minutos de Gemini + ffmpeg).
+app.post('/api/publicado-y-limpiar', async (req, res) => {
+  const clave = req.get('X-Pipeline-Key') || req.body?.key;
+
+  if (!PIPELINE_KEY) {
+    return res.status(503).json({ success: false, error: 'PIPELINE_KEY no está configurada en el servidor.' });
+  }
+  if (!claveValida(clave)) {
+    console.warn(`🚫 Acceso denegado a /api/publicado-y-limpiar desde ${req.ip}`);
+    return res.status(401).json({ success: false, error: 'Clave inválida o ausente (header X-Pipeline-Key).' });
+  }
+
+  try {
+    const { borrados, conservado, error } = await limpiarVideosPublicados();
+    if (error) {
+      return res.status(500).json({ success: false, error, borrados: [] });
+    }
+    return res.json({
+      success: true,
+      borrados,
+      conservado,
+      mensaje: borrados.length
+        ? `Publicado en todas las redes: ${borrados.length} video(s) anterior(es) borrado(s).`
+        : 'No había videos anteriores que borrar.',
+    });
+  } catch (error) {
+    console.error('Error en /api/publicado-y-limpiar:', error.message);
+    return res.status(500).json({ success: false, error: error.message });
   }
 });
 

@@ -27,6 +27,7 @@ import { repartirGestos, rutaGesto, MAX_GESTOS_POR_VIDEO } from './gestosGir.js'
 import { getMediaDuration } from './mediaProbe.js';
 import { obtenerTendenciasMX, ordenarPorTendencia } from './tendenciasService.js';
 import { elegirNoRepetida } from './dedupService.js';
+import { publicarEnFacebook, facebookConfigurado } from './facebookService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -136,6 +137,116 @@ async function subirEstado(estado) {
     JSON.stringify(estado, null, 2),
     { contentType: 'application/json', resumable: false }
   );
+}
+
+// ─── Estado de publicación, red por red ─────────────────────────────────────
+//
+// Anota en qué redes se publicó cada video. Existe para cumplir la regla de
+// oro del proyecto: un video NO se borra del bucket hasta que se publicó en
+// TODAS las redes. Si Facebook falla, el video se queda en el bucket y se
+// reintenta en la siguiente pasada, en vez de perderse para siempre.
+//
+// Estructura:
+//   { "ciencia_cool_123.mp4": {
+//       titulo, descripcion,
+//       facebook: { ok, id, permalink, motivo, fecha },
+//       youtube:  { ok, fecha } } }
+const RUTA_PUBLICACIONES = 'estado/publicaciones.json';
+
+async function descargarPublicaciones() {
+  try {
+    const [contenido] = await storage.bucket(BUCKET).file(RUTA_PUBLICACIONES).download();
+    const publicaciones = JSON.parse(contenido.toString('utf8'));
+    return (publicaciones && typeof publicaciones === 'object' && !Array.isArray(publicaciones))
+      ? publicaciones
+      : {};
+  } catch (error) {
+    // 404 es lo normal la primera vez: el archivo todavía no existe.
+    if (error.code !== 404) {
+      console.error('No se pudo leer el estado de publicaciones:', error.message);
+    }
+    return {};
+  }
+}
+
+async function guardarPublicaciones(publicaciones) {
+  await storage.bucket(BUCKET).file(RUTA_PUBLICACIONES).save(
+    JSON.stringify(publicaciones, null, 2),
+    { contentType: 'application/json', resumable: false }
+  );
+}
+
+/**
+ * Anota el resultado de publicar (o de intentarlo) en una red.
+ *
+ * Se vuelve a descargar el archivo antes de escribir para no pisar lo que haya
+ * anotado otra instancia mientras tanto.
+ */
+async function registrarPublicacion(archivo, red, resultado, extras = {}) {
+  if (!archivo) return;
+  try {
+    const publicaciones = await descargarPublicaciones();
+    publicaciones[archivo] = {
+      ...(publicaciones[archivo] || {}),
+      ...extras,
+      [red]: {
+        ok: resultado.ok === true,
+        id: resultado.id || null,
+        permalink: resultado.permalink || null,
+        motivo: resultado.ok ? null : (resultado.motivo || 'error'),
+        fecha: new Date().toISOString(),
+      },
+    };
+    await guardarPublicaciones(publicaciones);
+  } catch (error) {
+    // No poder anotar el resultado no debe tumbar el video.
+    console.error('No se pudo guardar el estado de publicación:', error.message);
+  }
+}
+
+/**
+ * Reintenta publicar en Facebook los videos que quedaron pendientes.
+ *
+ * Se llama al principio de cada pasada. Si la vez anterior Facebook falló, el
+ * video sigue en el bucket (no se borró, ver limpiarVideosPublicados) y aquí se
+ * le da otra oportunidad: mejor publicar el video de ayer un rato después que
+ * no publicarlo nunca.
+ *
+ * @returns {Promise<Array<{archivo: string, ok: boolean, motivo?: string}>>}
+ */
+async function publicarPendientesEnFacebook(log = console.log) {
+  if (!facebookConfigurado()) return [];
+
+  try {
+    const publicaciones = await descargarPublicaciones();
+    const pendientes = Object.entries(publicaciones)
+      .filter(([, ficha]) => ficha?.facebook?.ok === false)
+      .map(([archivo]) => archivo);
+
+    if (!pendientes.length) return [];
+
+    log(`♻️ ${pendientes.length} video(s) sin publicar en Facebook: se reintenta.`);
+    const resultados = [];
+
+    for (const archivo of pendientes) {
+      const ficha = publicaciones[archivo] || {};
+      const resultado = await publicarEnFacebook({
+        videoUrl: `https://storage.googleapis.com/${BUCKET}/${archivo}`,
+        title: ficha.titulo,
+        description: ficha.descripcion,
+      });
+      await registrarPublicacion(archivo, 'facebook', resultado);
+      resultados.push({ archivo, ...resultado });
+      log(resultado.ok
+        ? `♻️ Reintento en Facebook OK: ${archivo}`
+        : `⚠️ Reintento en Facebook falló (${archivo}): ${resultado.motivo}`);
+    }
+
+    return resultados;
+  } catch (error) {
+    console.error('No se pudieron reintentar las publicaciones pendientes:', error.message);
+    return [];
+  }
 }
 
 /**
@@ -259,7 +370,24 @@ export async function limpiarVideosPublicados() {
     }
 
     const conservado = videos[videos.length - 1].name;
-    const sobran = videos.slice(0, -1).map(f => f.name);
+
+    // A este endpoint lo llama n8n DESPUÉS de subir a YouTube, así que el video
+    // que se conserva ya está publicado ahí. Se anota para tener la ficha.
+    await registrarPublicacion(conservado, 'youtube', { ok: true });
+
+    const publicaciones = await descargarPublicaciones();
+
+    // ── Regla de oro: no borrar lo que no se publicó en todas las redes ──────
+    // Si Facebook falló, el video se queda en el bucket y se reintenta en la
+    // siguiente pasada (ver publicarPendientesEnFacebook). Los videos viejos,
+    // anteriores a esta función, no tienen ficha: se dan por publicados.
+    const candidatos = videos.slice(0, -1).map(f => f.name);
+    const pendientes = candidatos.filter(nombre => publicaciones[nombre]?.facebook?.ok === false);
+    const sobran = candidatos.filter(nombre => !pendientes.includes(nombre));
+
+    if (pendientes.length) {
+      console.warn(`⏸️ No se borran ${pendientes.length} video(s): siguen pendientes de Facebook (${pendientes.join(', ')})`);
+    }
 
     await Promise.all(sobran.map(nombre =>
       storage.bucket(BUCKET).file(nombre).delete().catch(err =>
@@ -268,7 +396,7 @@ export async function limpiarVideosPublicados() {
     ));
 
     console.log(`🧹 Publicado en todas las redes: ${sobran.length} video(s) borrado(s); se conserva ${conservado}`);
-    return { borrados: sobran, conservado };
+    return { borrados: sobran, conservado, pendientes };
   } catch (error) {
     console.error('No se pudo limpiar los videos publicados:', error.message);
     return { borrados: [], conservado: null, error: error.message };
@@ -625,6 +753,11 @@ export async function ejecutarPipeline(opts = {}) {
       log(`⏱️ ${nombre}: ${tiempos[nombre]}s`);
     };
 
+    // ── Reintentos pendientes ────────────────────────────────────────────────
+    // Si en una pasada anterior Facebook falló, ese video sigue en el bucket.
+    // Se reintenta AHORA, antes de generar uno nuevo, para no perderlo.
+    await publicarPendientesEnFacebook(log);
+
     // ── 1. Noticia ────────────────────────────────────────────────────────────
     let paso = Date.now();
     const catElegida = categoria || await siguienteCategoria();
@@ -782,6 +915,7 @@ export async function ejecutarPipeline(opts = {}) {
     // Sin esto, la URL del render deja de funcionar a los minutos de generarse.
     paso = Date.now();
     log('Subiendo el video a Google Cloud Storage...');
+    let facebook = null;
     const urlGcs = stat.size > 0
       ? await subirAGcs(resultado.videoPath, resultado.filename)
       : null;
@@ -802,6 +936,35 @@ export async function ejecutarPipeline(opts = {}) {
         ? await borrarVideosAntiguos(resultado.filename)
         : await borrarVideosAntiguos(resultado.filename, { soloMasViejosQueDias: 3 });
       if (borrados) marcar('limpieza de Cloud', paso);
+
+      // ── Facebook ──────────────────────────────────────────────────────────
+      // Se publica aquí, dentro del pipeline, y no como un nodo más de n8n,
+      // por una razón: así la regla "no borrar hasta publicar en todas las
+      // redes" vive en un solo sitio y no depende de que el orquestador se
+      // acuerde de hacerlo en el orden correcto.
+      //
+      // Facebook se descarga el MP4 él solo desde la URL pública del bucket.
+      if (facebookConfigurado()) {
+        paso = Date.now();
+        log('Publicando en Facebook...');
+        facebook = await publicarEnFacebook({
+          videoUrl: urlGcs,
+          title: pub.titulo,
+          description: pub.descripcion,
+        });
+        await registrarPublicacion(resultado.filename, 'facebook', facebook, {
+          titulo: pub.titulo,
+          descripcion: pub.descripcion,
+        });
+        if (facebook.ok) {
+          log(`✅ Facebook: ${facebook.permalink || facebook.id}`);
+        } else {
+          log(`⚠️ Facebook falló (${facebook.motivo}). El video NO se borrará del bucket: se reintentará en la siguiente pasada.`);
+        }
+        marcar('publicación en Facebook', paso);
+      } else {
+        log('ℹ️ Facebook sin configurar: se omite (revisa FACEBOOK_PAGE_ID y FACEBOOK_PAGE_TOKEN).');
+      }
     } else {
       log('No se pudo subir a GCS; se devuelve la URL de Cloud Run (temporal).');
     }
@@ -822,6 +985,7 @@ export async function ejecutarPipeline(opts = {}) {
       newsTitle: noticia.newsTitle,
       voiceId,
       sceneCount: (script.scenes || []).length,
+      facebook,
       tiempos,
     };
 

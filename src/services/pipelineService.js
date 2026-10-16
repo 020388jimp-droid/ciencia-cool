@@ -979,7 +979,12 @@ export async function ejecutarPipeline(opts = {}) {
       title: pub.titulo,
       description: pub.descripcion,
       caption: pub.caption,
-      hashtags: pub.hashtags,
+      // OJO: n8n mete este campo tal cual en el campo "Tags" del nodo de
+      // YouTube, que espera TEXTO separado por comas ("ciencia, marte, nasa"),
+      // NO una lista. Si se devuelve el array, n8n se cae con
+      // "options.tags.split is not a function" y el video no se sube.
+      // Se quita el "#": YouTube no lo quiere dentro de las etiquetas.
+      hashtags: pub.hashtags.map(h => String(h).replace(/^#/, '')).join(', '),
       category: script.category || noticia.category || '',
       source: noticia.source,
       newsTitle: noticia.newsTitle,

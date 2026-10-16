@@ -274,7 +274,11 @@ app.post('/api/pipeline-completo', async (req, res) => {
 
       const titulo = String(existente.title || 'CIENCIA COOL').slice(0, 100);
       const descripcion = String(existente.description || titulo);
-      const hashtags = Array.isArray(existente.hashtags) ? existente.hashtags.map(String) : [];
+      // Igual que en el pipeline: el nodo de YouTube de n8n espera texto
+      // separado por comas, no una lista de JSON.
+      const hashtags = (Array.isArray(existente.hashtags) ? existente.hashtags : [])
+        .map(h => String(h).replace(/^#/, ''))
+        .join(', ');
 
       pasos.push(`Video existente: se omite la generación. Se publica ${url.split('/').pop()}`);
 

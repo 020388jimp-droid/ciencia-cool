@@ -63,6 +63,9 @@ export async function publicarEnFacebook({ videoUrl, title, description }) {
         {
           timeout: 120000,
           headers: { 'Content-Type': 'application/json' },
+          // Sin esto la Graph API responde "An access token is required to
+          // request this resource" y no publica nada.
+          params: { access_token: token },
         }
       );
 

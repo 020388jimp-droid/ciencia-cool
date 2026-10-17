@@ -8,6 +8,16 @@ document.addEventListener('DOMContentLoaded', () => {
   loadHistory();
   loadNasaAPOD();
   setupEventListeners();
+
+  // La pestaña de TikTok se refresca sola cada 2 minutos MIENTRAS está abierta.
+  // Sirve para que, si se quedó abierta esperando el video de las 14:00, el
+  // texto aparezca sin tener que recargar. Cuando la pestaña no está a la
+  // vista no se pide nada.
+  setInterval(() => {
+    if (document.getElementById('tiktok-tab')?.classList.contains('active')) {
+      refrescarTikTokSilencioso();
+    }
+  }, 120000);
 });
 
 // Navegación de pestañas
@@ -27,6 +37,7 @@ function setupTabs() {
 
       if (targetId === 'library-tab') loadLibrary();
       if (targetId === 'videos-tab') loadVideosLibrary();
+      if (targetId === 'tiktok-tab') loadTikTokTextos();
     });
   });
 }
@@ -863,4 +874,214 @@ function setupEventListeners() {
       grid.innerHTML = `<div class="loading-spinner" style="color: var(--danger)">Error: ${e.message}</div>`;
     }
   });
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PESTAÑA TIKTOK: textos listos para copiar y pegar
+//
+// TikTok no se publica solo (su API exige que una persona dé el último toque),
+// así que esta pestaña muestra el título y la descripción del video más
+// reciente para copiarlos y pegarlos en la app de TikTok.
+//
+// Quién decide qué está vigente es el servidor (src/services/tiktokTextos.js):
+// solo el video más reciente, y solo hasta una hora antes de que se genere el
+// siguiente. Cuando caduca, la pestaña se ve vacía a propósito, para que nunca
+// se copie por error el texto de un video que ya pasó.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Firma de la última respuesta pintada: sirve para no volver a dibujar (ni
+// hacer parpadear) lo que ya está en pantalla cuando el refresco automático
+// trae exactamente lo mismo.
+let firmaTikTok = null;
+
+async function loadTikTokTextos() {
+  const cont = document.getElementById('tiktok-content');
+  if (!cont) return;
+  cont.innerHTML = '<div class="loading-spinner">Cargando los textos del video más reciente...</div>';
+  await pintarTikTok(cont, false);
+}
+
+// Refresco silencioso: si algo falla (sin internet, servidor despierto a
+// medias), deja en pantalla lo que ya había en vez de borrarlo.
+async function refrescarTikTokSilencioso() {
+  const cont = document.getElementById('tiktok-content');
+  if (!cont) return;
+  await pintarTikTok(cont, true);
+}
+
+async function pintarTikTok(cont, silencioso) {
+  try {
+    // El "?t=" evita que el navegador sirva una respuesta guardada en caché.
+    const res = await fetch(`/api/tiktok/textos?t=${Date.now()}`);
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error || 'Error del servidor');
+
+    const firma = JSON.stringify({
+      motivo: data.motivo || '',
+      archivo: data.vigente?.archivo || '',
+      titulo: data.vigente?.titulo || '',
+      descripcion: data.vigente?.descripcion || '',
+      caduca: data.vigente?.caducaEn || '',
+      descargable: data.vigente?.videoDisponible === true,
+      proxima: data.proximaGeneracion || '',
+    });
+    if (firma === firmaTikTok) return; // ya está en pantalla: no se toca
+    firmaTikTok = firma;
+
+    cont.innerHTML = data.vigente ? htmlTikTokVigente(data.vigente) : htmlTikTokVacio(data);
+  } catch (error) {
+    console.error('No se pudieron cargar los textos de TikTok:', error);
+    if (!silencioso) {
+      firmaTikTok = null;
+      cont.innerHTML = `<div class="loading-spinner" style="color: var(--danger)">No se pudieron cargar los textos: ${escaparHtml(error.message)}</div>`;
+    }
+  }
+}
+
+function htmlTikTokVigente(v) {
+  const aviso = v.caducaHora
+    ? `⏳ Aquí arriba está el texto correcto hasta el ${v.caducaFecha} a las ${v.caducaHora} (hora de México): una hora antes de que se genere el siguiente video. Después de eso la pestaña se vacía sola.`
+    : '';
+
+  return `
+    <div class="tiktok-card">
+      <div class="card-badge-row" style="margin-bottom:1rem;">
+        <span class="badge badge-ciencia">🎬 ${escaparHtml(v.archivo)}</span>
+        <span class="card-date">Generado el ${escaparHtml(v.generadoFecha)} a las ${escaparHtml(v.generadoHora)} (hora de México)</span>
+        ${v.categoria ? `<span class="badge badge-historia">${escaparHtml(v.categoria)}</span>` : ''}
+      </div>
+
+      <div class="tiktok-bloque">
+        <h3>
+          <span>📌 Título</span>
+          <button class="btn btn-primary" onclick="copiarTikTok('tiktok-titulo', this)">📋 Copiar título</button>
+        </h3>
+        <div id="tiktok-titulo" class="tiktok-texto">${escaparHtml(v.titulo)}</div>
+      </div>
+
+      <div class="tiktok-bloque">
+        <h3>
+          <span>📝 Descripción</span>
+          <button class="btn btn-primary" onclick="copiarTikTok('tiktok-descripcion', this)">📋 Copiar descripción</button>
+        </h3>
+        <div id="tiktok-descripcion" class="tiktok-texto">${escaparHtml(v.descripcion)}</div>
+      </div>
+
+      ${v.hashtags && v.hashtags.length ? `
+        <div class="tiktok-bloque">
+          <h3>
+            <span>#️⃣ Hashtags</span>
+            <button class="btn btn-secondary" onclick="copiarTikTok('tiktok-hashtags', this)">📋 Copiar hashtags</button>
+          </h3>
+          <div id="tiktok-hashtags" class="tiktok-texto" style="max-height:none;">${escaparHtml(v.hashtags.join(' '))}</div>
+        </div>
+      ` : ''}
+
+      <div class="card-actions" style="margin-top:1.2rem;">
+        <button class="btn btn-secondary" onclick="copiarTikTokTodo(this)">📋 Copiar todo (título + descripción)</button>
+        ${v.videoDisponible && v.videoUrl ? `<a class="btn btn-secondary" style="text-decoration:none;" href="${v.videoUrl}" download="${escaparHtml(v.archivo)}">⬇️ Descargar el video</a>` : ''}
+        <button class="btn btn-secondary" onclick="loadTikTokTextos()">🔄 Actualizar</button>
+      </div>
+
+      ${v.videoDisponible ? '' : '<p class="tiktok-aviso">ℹ️ El video ya no está en el bucket: se borró después de publicarse en todas las redes. El texto sigue ahí por si lo necesitas, pero si lo quieres subir a mano tendrás que regenerarlo.</p>'}
+      ${aviso ? `<p class="tiktok-aviso">${aviso}</p>` : ''}
+    </div>
+  `;
+}
+
+function htmlTikTokVacio(data) {
+  const cuando = data.proximaGeneracionHora
+    ? `El siguiente video se genera el ${escaparHtml(data.proximaGeneracionFecha)} a las ${escaparHtml(data.proximaGeneracionHora)} (hora de México).`
+    : '';
+
+  const porque = data.motivo === 'caducado'
+    ? `El texto del video de las ${escaparHtml(data.ultimo?.generadoHora || '—')} ya cumplió su tiempo y se ocultó, como acordamos, para no copiar por error el de un video que ya pasó.`
+    : 'Todavía no hay ningún video apuntado para TikTok. En cuanto el pipeline genere el siguiente, aparecerá aquí con su título y su descripción.';
+
+  return `
+    <div class="tiktok-vacio">
+      <div class="empty-icon">🎵</div>
+      <p class="tiktok-vacio-titulo">Ahora mismo no hay nada que copiar para TikTok.</p>
+      <p class="tiktok-aviso" style="font-size:0.95rem;">${porque}</p>
+      ${cuando ? `<p class="tiktok-vacio-cuando">${cuando}</p>` : ''}
+      <p class="tiktok-aviso" style="margin-top:1rem;">Hora de México en el servidor: ${escaparHtml(data.ahoraHora || '—')}</p>
+    </div>
+  `;
+}
+
+// ─── Copiado al portapapeles ─────────────────────────────────────────────────
+
+window.copiarTikTok = async function(id, boton) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  try {
+    await copiarAlPortapapeles(el.innerText.trim());
+    marcarCopiado(boton);
+  } catch (error) {
+    showToast('No se pudo copiar: ' + error.message, true);
+  }
+};
+
+window.copiarTikTokTodo = async function(boton) {
+  const titulo = document.getElementById('tiktok-titulo')?.innerText.trim() || '';
+  const descripcion = document.getElementById('tiktok-descripcion')?.innerText.trim() || '';
+  try {
+    await copiarAlPortapapeles([titulo, '', descripcion].join('\n').trim());
+    marcarCopiado(boton);
+  } catch (error) {
+    showToast('No se pudo copiar: ' + error.message, true);
+  }
+};
+
+function copiarAlPortapapeles(texto) {
+  // navigator.clipboard solo existe en páginas seguras (https, que es el caso
+  // en Cloud Run), pero además algunos navegadores exigen que la pestaña tenga
+  // el foco y si no, lo niegan. Cuando eso pasa se cae al método clásico en vez
+  // de dejar al usuario sin poder copiar.
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(texto).catch((error) => {
+      console.warn('El portapapeles moderno no dejó copiar, se intenta el clásico:', error.message);
+      return copiarAlPortapapelesClasico(texto);
+    });
+  }
+  return copiarAlPortapapelesClasico(texto);
+}
+
+function copiarAlPortapapelesClasico(texto) {
+  return new Promise((resolve, reject) => {
+    try {
+      const area = document.createElement('textarea');
+      area.value = texto;
+      area.style.position = 'fixed';
+      area.style.opacity = '0';
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(area);
+      ok ? resolve() : reject(new Error('el navegador no dejó copiar'));
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+function marcarCopiado(boton) {
+  showToast('📋 Copiado. Ya lo puedes pegar en TikTok.');
+  if (!boton || boton.dataset.copiando === '1') return;
+  const original = boton.innerText;
+  boton.dataset.copiando = '1';
+  boton.innerText = '✅ ¡Copiado!';
+  setTimeout(() => {
+    boton.innerText = original;
+    delete boton.dataset.copiando;
+  }, 2000);
+}
+
+// Los textos vienen de Gemini, pero se escapan igual antes de meterlos en el
+// HTML: si un titular trajera un "<", sin esto rompería la página.
+function escaparHtml(texto) {
+  return String(texto ?? '').replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
 }

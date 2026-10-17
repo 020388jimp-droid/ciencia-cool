@@ -580,6 +580,82 @@ body {
 }
 
 /* ==========================================================================
+   PESTAÑA TIKTOK: textos listos para copiar y pegar en la app
+   ========================================================================== */
+
+.tiktok-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  padding: 1.25rem;
+  max-width: 900px;
+}
+
+.tiktok-bloque {
+  margin-bottom: 1.1rem;
+}
+
+.tiktok-bloque h3 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+  font-size: 0.95rem;
+  color: var(--primary);
+  margin-bottom: 0.45rem;
+}
+
+.tiktok-texto {
+  background: rgba(0, 0, 0, 0.38);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 0.85rem 0.95rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  color: var(--text-main);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow: auto;
+  user-select: text;
+}
+
+.tiktok-aviso {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  line-height: 1.5;
+  margin-top: 0.5rem;
+}
+
+.tiktok-vacio {
+  background: var(--bg-card);
+  border: 1px dashed var(--border-color);
+  border-radius: 14px;
+  padding: 2.5rem 1.5rem;
+  text-align: center;
+  max-width: 780px;
+}
+
+.tiktok-vacio .empty-icon {
+  font-size: 2.4rem;
+  margin-bottom: 0.6rem;
+}
+
+.tiktok-vacio-titulo {
+  font-size: 1.1rem;
+  font-weight: 700;
+  margin-bottom: 0.6rem;
+}
+
+.tiktok-vacio-cuando {
+  margin-top: 0.8rem;
+  color: var(--primary);
+  font-weight: 700;
+}
+
+/* ==========================================================================
    OPTIMIZACIÓN RESPONSIVE (MÓVILES Y TABLETS)
    ========================================================================== */
 

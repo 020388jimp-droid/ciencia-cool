@@ -28,6 +28,7 @@
       <button class="nav-btn" data-tab="studio-tab">🎬 Estudio de Guiones</button>
       <button class="nav-btn" data-tab="library-tab">📁 Biblioteca</button>
       <button class="nav-btn" data-tab="videos-tab" style="background:linear-gradient(135deg,rgba(124,58,237,0.3),rgba(168,85,247,0.3)); border-color:rgba(168,85,247,0.5);">🚀 Mis Videos</button>
+      <button class="nav-btn" data-tab="tiktok-tab" style="background:linear-gradient(135deg,rgba(0,229,255,0.25),rgba(254,44,85,0.25)); border-color:rgba(0,229,255,0.45);">🎵 TikTok</button>
     </nav>
   </header>
 
@@ -195,6 +196,21 @@
       </div>
       <div id="videos-grid" class="cards-grid">
         <div class="loading-spinner">Aún no hay videos renderizados. ¡Genera el primero desde el Estudio!</div>
+      </div>
+    </section>
+
+    <!-- 8. PESTAÑA: TEXTOS PARA TIKTOK -->
+    <section id="tiktok-tab" class="tab-pane">
+      <div class="section-header">
+        <div>
+          <h2>🎵 Textos para TikTok</h2>
+          <p>El título y la descripción del video más reciente, listos para copiar y pegar en TikTok. La pestaña se vacía una hora antes de que se genere el siguiente video, así lo que veas aquí es siempre lo que toca publicar.</p>
+        </div>
+        <button id="btn-refresh-tiktok" class="btn btn-secondary" onclick="loadTikTokTextos()">🔄 Actualizar</button>
+      </div>
+
+      <div id="tiktok-content">
+        <div class="loading-spinner">Cargando los textos del video más reciente...</div>
       </div>
     </section>
 

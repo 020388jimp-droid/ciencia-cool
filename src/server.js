@@ -17,6 +17,7 @@ import { renderFinalVideo, buildRenderScenes } from './services/videoRenderServi
 import { ejecutarPipeline, estadoPipeline, limpiarVideosPublicados } from './services/pipelineService.js';
 import { verificarCuentaInstagram } from './services/instagramService.js';
 import { estadoTokenInstagram } from './services/instagramToken.js';
+import { pendientesTikTok, registrarTextosTikTok, horariosTikTok } from './services/tiktokTextos.js';
 
 dotenv.config();
 
@@ -284,6 +285,22 @@ app.post('/api/pipeline-completo', async (req, res) => {
 
       pasos.push(`Video existente: se omite la generación. Se publica ${url.split('/').pop()}`);
 
+      // Los textos también se apuntan para la pestaña de TikTok: por este
+      // camino se publica un video que ya existía, y sin esto la pestaña se
+      // quedaría sin título ni descripción.
+      await registrarTextosTikTok({
+        archivo: url.split('/').pop(),
+        videoUrl: url,
+        titulo,
+        descripcion,
+        caption: existente.caption ? String(existente.caption) : descripcion,
+        hashtags: Array.isArray(existente.hashtags) ? existente.hashtags : hashtags,
+        categoria: String(existente.category || ''),
+        fuente: String(existente.source || ''),
+        noticia: String(existente.newsTitle || titulo),
+      });
+
+
       return res.json({
         success: true,
         elapsedSec: 0,
@@ -477,6 +494,26 @@ app.get('/api/instagram/estado', async (req, res) => {
   } catch (error) {
     console.error('Error en /api/instagram/estado:', error.message);
     return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// API: Textos del video más reciente, listos para copiar y pegar en TikTok.
+//
+// Es el motor de la pestaña "TikTok" de la web y NO lleva clave a propósito: la
+// web ya es pública (igual que /api/videos o las noticias) y esto es lo mismo
+// que se ve publicado en YouTube, Facebook e Instagram. Lo que sí está
+// protegido con PIPELINE_KEY son los endpoints que gastan dinero (generar
+// videos) o que borran cosas.
+//
+// La regla de vigencia está en tiktokTextos.js: solo se devuelve el texto del
+// video más reciente, y solo hasta una hora antes de que se genere el siguiente.
+app.get('/api/tiktok/textos', async (req, res) => {
+  try {
+    const pendiente = await pendientesTikTok();
+    res.json({ success: true, ...pendiente, horarios: horariosTikTok() });
+  } catch (error) {
+    console.error('Error en /api/tiktok/textos:', error.message);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 

@@ -29,6 +29,7 @@ import { obtenerTendenciasMX, ordenarPorTendencia } from './tendenciasService.js
 import { elegirNoRepetida } from './dedupService.js';
 import { publicarEnFacebook, facebookConfigurado } from './facebookService.js';
 import { publicarEnInstagram, instagramConfigurado } from './instagramService.js';
+import { registrarTextosTikTok } from './tiktokTextos.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -974,6 +975,27 @@ export async function ejecutarPipeline(opts = {}) {
       : null;
     if (urlGcs) {
       log(`Video disponible en GCS: ${urlGcs}`);
+
+      // ── Textos para la pestaña TikTok de la web ───────────────────────────
+      // TikTok es la única red que se publica a mano (su API exige que la
+      // persona dé el último toque), así que el título y la descripción de
+      // este video se apuntan aquí para poder copiarlos y pegarlos desde la
+      // web. Se hace con el video ya en el bucket porque es el único punto
+      // donde se conocen los textos definitivos.
+      //
+      // Va ANTES de Facebook e Instagram a propósito: si esas publicaciones
+      // tardan o fallan, los textos para TikTok ya quedaron guardados.
+      await registrarTextosTikTok({
+        archivo: resultado.filename,
+        videoUrl: urlGcs,
+        titulo: pub.titulo,
+        descripcion: pub.descripcion,
+        caption: pub.caption,
+        hashtags: pub.hashtags,
+        categoria: script.category || noticia.category || '',
+        fuente: noticia.source || '',
+        noticia: noticia.newsTitle || noticia.topic || '',
+      });
 
       // Limpieza. Antes se borraba AQUÍ, nada más generar. Ahora el video se
       // queda en el bucket hasta que n8n confirma que se publicó en TODAS las

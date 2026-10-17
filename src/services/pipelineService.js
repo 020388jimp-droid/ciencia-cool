@@ -28,6 +28,7 @@ import { getMediaDuration } from './mediaProbe.js';
 import { obtenerTendenciasMX, ordenarPorTendencia } from './tendenciasService.js';
 import { elegirNoRepetida } from './dedupService.js';
 import { publicarEnFacebook, facebookConfigurado } from './facebookService.js';
+import { publicarEnInstagram, instagramConfigurado } from './instagramService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -250,6 +251,50 @@ async function publicarPendientesEnFacebook(log = console.log) {
 }
 
 /**
+ * Reintenta publicar en Instagram los Reels que quedaron pendientes.
+ *
+ * Instagram tiene su propio reloj: cuando publica, el video ya está en el
+ * bucket desde hace rato. Si el Reel falló (o tardó más de lo que aguanta el
+ * pipeline), el video sigue guardado y aquí se le da otra oportunidad.
+ *
+ * @returns {Promise<Array<{archivo: string, ok: boolean, motivo?: string}>>}
+ */
+async function publicarPendientesEnInstagram(log = console.log) {
+  if (!instagramConfigurado()) return [];
+
+  try {
+    const publicaciones = await descargarPublicaciones();
+    const pendientes = Object.entries(publicaciones)
+      .filter(([, ficha]) => ficha?.instagram?.ok === false)
+      .map(([archivo]) => archivo);
+
+    if (!pendientes.length) return [];
+
+    log(`♻️ ${pendientes.length} video(s) sin publicar en Instagram: se reintenta.`);
+    const resultados = [];
+
+    for (const archivo of pendientes) {
+      const ficha = publicaciones[archivo] || {};
+      const resultado = await publicarEnInstagram({
+        videoUrl: `https://storage.googleapis.com/${BUCKET}/${archivo}`,
+        caption: ficha.descripcion,
+        title: ficha.titulo,
+      });
+      await registrarPublicacion(archivo, 'instagram', resultado);
+      resultados.push({ archivo, ...resultado });
+      log(resultado.ok
+        ? `♻️ Reintento en Instagram OK: ${archivo}`
+        : `⚠️ Reintento en Instagram falló (${archivo}): ${resultado.motivo}`);
+    }
+
+    return resultados;
+  } catch (error) {
+    console.error('No se pudieron reintentar los Reels pendientes:', error.message);
+    return [];
+  }
+}
+
+/**
  * Marca un titular como usado en su categoría.
  *
  * Se vuelve a descargar el archivo antes de escribir: si hay otra instancia
@@ -378,15 +423,20 @@ export async function limpiarVideosPublicados() {
     const publicaciones = await descargarPublicaciones();
 
     // ── Regla de oro: no borrar lo que no se publicó en todas las redes ──────
-    // Si Facebook falló, el video se queda en el bucket y se reintenta en la
-    // siguiente pasada (ver publicarPendientesEnFacebook). Los videos viejos,
-    // anteriores a esta función, no tienen ficha: se dan por publicados.
+    // Si Facebook o Instagram fallaron, el video se queda en el bucket y se
+    // reintenta en la siguiente pasada (ver publicarPendientesEnFacebook y
+    // publicarPendientesEnInstagram). Las redes que no están configuradas no
+    // anotan ficha, así que no frenan el borrado; los videos viejos, anteriores
+    // a esta función, tampoco tienen ficha: se dan por publicados.
     const candidatos = videos.slice(0, -1).map(f => f.name);
-    const pendientes = candidatos.filter(nombre => publicaciones[nombre]?.facebook?.ok === false);
+    const pendientes = candidatos.filter((nombre) => {
+      const ficha = publicaciones[nombre];
+      return ficha?.facebook?.ok === false || ficha?.instagram?.ok === false;
+    });
     const sobran = candidatos.filter(nombre => !pendientes.includes(nombre));
 
     if (pendientes.length) {
-      console.warn(`⏸️ No se borran ${pendientes.length} video(s): siguen pendientes de Facebook (${pendientes.join(', ')})`);
+      console.warn(`⏸️ No se borran ${pendientes.length} video(s): siguen pendientes de publicar (${pendientes.join(', ')})`);
     }
 
     await Promise.all(sobran.map(nombre =>
@@ -754,9 +804,11 @@ export async function ejecutarPipeline(opts = {}) {
     };
 
     // ── Reintentos pendientes ────────────────────────────────────────────────
-    // Si en una pasada anterior Facebook falló, ese video sigue en el bucket.
-    // Se reintenta AHORA, antes de generar uno nuevo, para no perderlo.
+    // Si en una pasada anterior Facebook o Instagram fallaron, ese video sigue
+    // en el bucket. Se reintentan AHORA, antes de generar uno nuevo, para no
+    // perderlos.
     await publicarPendientesEnFacebook(log);
+    await publicarPendientesEnInstagram(log);
 
     // ── 1. Noticia ────────────────────────────────────────────────────────────
     let paso = Date.now();
@@ -916,6 +968,7 @@ export async function ejecutarPipeline(opts = {}) {
     paso = Date.now();
     log('Subiendo el video a Google Cloud Storage...');
     let facebook = null;
+    let instagram = null;
     const urlGcs = stat.size > 0
       ? await subirAGcs(resultado.videoPath, resultado.filename)
       : null;
@@ -965,6 +1018,33 @@ export async function ejecutarPipeline(opts = {}) {
       } else {
         log('ℹ️ Facebook sin configurar: se omite (revisa FACEBOOK_PAGE_ID y FACEBOOK_PAGE_TOKEN).');
       }
+
+      // ── Instagram ─────────────────────────────────────────────────────────
+      // Dos llamadas y una espera de procesado (ver instagramService.js). Va
+      // DESPUÉS de Facebook a propósito: si Instagram se pasa del tiempo que
+      // aguanta Cloud Run, el video ya está publicado en Facebook y el Reel se
+      // reintenta en la siguiente pasada, sin repetir nada.
+      if (instagramConfigurado()) {
+        paso = Date.now();
+        log('Publicando en Instagram...');
+        instagram = await publicarEnInstagram({
+          videoUrl: urlGcs,
+          caption: pub.caption || pub.descripcion,
+          title: pub.titulo,
+        });
+        await registrarPublicacion(resultado.filename, 'instagram', instagram, {
+          titulo: pub.titulo,
+          descripcion: pub.descripcion,
+        });
+        if (instagram.ok) {
+          log(`✅ Instagram: ${instagram.permalink || instagram.id}`);
+        } else {
+          log(`⚠️ Instagram falló (${instagram.motivo}). El video NO se borrará del bucket: se reintentará en la siguiente pasada.`);
+        }
+        marcar('publicación en Instagram', paso);
+      } else {
+        log('ℹ️ Instagram sin configurar: se omite (revisa INSTAGRAM_USER_ID e INSTAGRAM_TOKEN).');
+      }
     } else {
       log('No se pudo subir a GCS; se devuelve la URL de Cloud Run (temporal).');
     }
@@ -991,6 +1071,7 @@ export async function ejecutarPipeline(opts = {}) {
       voiceId,
       sceneCount: (script.scenes || []).length,
       facebook,
+      instagram,
       tiempos,
     };
 

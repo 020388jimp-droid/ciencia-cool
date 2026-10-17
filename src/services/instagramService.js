@@ -1,5 +1,6 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// Publicación de Reels en Instagram (Instagram Graph API v26.0).
+// Publicación de Reels en Instagram (API de Instagram con inicio de sesión de
+// Instagram, graph.instagram.com).
 //
 // ── Cómo se publica ─────────────────────────────────────────────────────────
 // Instagram NO acepta el MP4 en una sola llamada: son DOS pasos y un tiempo de
@@ -14,12 +15,22 @@
 //      → ahí sí, el Reel queda publicado.
 //
 // ── El token ────────────────────────────────────────────────────────────────
-// INSTAGRAM_TOKEN es el mismo token DE LA PÁGINA que usa Facebook. Necesita los
-// permisos instagram_basic e instagram_content_publish.
+// Se usa la API de Instagram con INICIO DE SESIÓN DE INSTAGRAM, que es la que
+// Meta mantiene hoy: el caso de uso "Administrar mensajes y contenido en
+// Instagram" del panel de la app. Los permisos son instagram_business_basic e
+// instagram_business_content_publish, y el token se saca ahí mismo, en
+// "2. Generar tokens de acceso → Agregar cuenta".
+//
+//   INSTAGRAM_USER_ID  → id de la cuenta profesional de Instagram
+//   INSTAGRAM_TOKEN    → token de larga duración (60 días, renovable)
+//
+// OJO con el dominio: esta API vive en graph.instagram.com, NO en
+// graph.facebook.com. Por eso la dirección es configurable: si algún día hay
+// que subir de versión (v23.0 → v24.0…), se hace con una variable de entorno,
+// sin tocar el código ni volver a construir la imagen.
 //
 // ── Requisitos de la cuenta ─────────────────────────────────────────────────
-// La cuenta de Instagram tiene que ser PROFESIONAL (Empresa o Creador) y estar
-// VINCULADA a la página de Facebook. Ese id es INSTAGRAM_USER_ID.
+// La cuenta de Instagram tiene que ser PROFESIONAL (Empresa o Creador).
 //
 // ── Por qué hay reintentos ──────────────────────────────────────────────────
 // Igual que en Facebook: el pipeline no debe morir por un mal minuto de Meta.
@@ -29,7 +40,7 @@
 
 import axios from 'axios';
 
-const GRAPH = 'https://graph.facebook.com/v26.0';
+const GRAPH = (process.env.INSTAGRAM_API_URL || 'https://graph.instagram.com/v23.0').replace(/\/$/, '');
 const INTENTOS = 3;
 const ESPERA_ENTRE_INTENTOS_MS = 5000;
 

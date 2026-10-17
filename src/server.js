@@ -15,6 +15,8 @@ import { generateAudioForScript, AVAILABLE_VOICES, DEFAULT_VOICE_ID } from './se
 import { findMediaForScenes } from './services/mediaService.js';
 import { renderFinalVideo, buildRenderScenes } from './services/videoRenderService.js';
 import { ejecutarPipeline, estadoPipeline, limpiarVideosPublicados } from './services/pipelineService.js';
+import { verificarCuentaInstagram } from './services/instagramService.js';
+import { estadoTokenInstagram } from './services/instagramToken.js';
 
 dotenv.config();
 
@@ -449,6 +451,33 @@ app.get('/api/pipeline-completo/status', (req, res) => {
       ? 'Usa el header X-Pipeline-Key con el valor de la variable PIPELINE_KEY.'
       : 'Falta definir PIPELINE_KEY en el servidor.',
   });
+});
+
+// API: ¿Está Instagram listo para publicar? No publica nada.
+//
+// Existe para poder comprobar el token sin esperar a la siguiente pasada y sin
+// subir un video de prueba: pregunta a Instagram con qué cuenta se publicaría y
+// cuántos días tiene el token guardado. Nunca devuelve el token.
+app.get('/api/instagram/estado', async (req, res) => {
+  if (!claveValida(req.get('X-Pipeline-Key'))) {
+    console.warn(`🚫 Acceso denegado a /api/instagram/estado desde ${req.ip}`);
+    return res.status(401).json({ success: false, error: 'Clave inválida o ausente (header X-Pipeline-Key).' });
+  }
+
+  try {
+    const [token, cuenta] = await Promise.all([estadoTokenInstagram(), verificarCuentaInstagram()]);
+    return res.json({
+      success: true,
+      configurado: Boolean(process.env.INSTAGRAM_USER_ID),
+      userID: process.env.INSTAGRAM_USER_ID || null,
+      token,
+      cuenta,
+      listo: cuenta.ok === true && cuenta.coincideConLaConfigurada === true,
+    });
+  } catch (error) {
+    console.error('Error en /api/instagram/estado:', error.message);
+    return res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // API: Listar guiones generados previamente

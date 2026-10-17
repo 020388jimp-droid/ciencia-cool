@@ -22,7 +22,11 @@
 // "2. Generar tokens de acceso → Agregar cuenta".
 //
 //   INSTAGRAM_USER_ID  → id de la cuenta profesional de Instagram
-//   INSTAGRAM_TOKEN    → token de larga duración (60 días, renovable)
+//   INSTAGRAM_TOKEN    → token de larga duración (60 días)
+//
+// El token se RENUEVA SOLO: vive en un bucket privado y se pide otro a Meta
+// antes de que caduque, sin que nadie tenga que acordarse. La variable de
+// entorno solo hace de semilla. Todo eso está en instagramToken.js.
 //
 // OJO con el dominio: esta API vive en graph.instagram.com, NO en
 // graph.facebook.com. Por eso la dirección es configurable: si algún día hay
@@ -39,6 +43,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import axios from 'axios';
+import { obtenerTokenInstagram } from './instagramToken.js';
 
 const GRAPH = (process.env.INSTAGRAM_API_URL || 'https://graph.instagram.com/v23.0').replace(/\/$/, '');
 const INTENTOS = 3;
@@ -160,11 +165,18 @@ async function publicarContenedor({ igUserId, token, containerId }) {
  */
 export async function publicarEnInstagram({ videoUrl, caption, title }) {
   const igUserId = process.env.INSTAGRAM_USER_ID;
-  const token = process.env.INSTAGRAM_TOKEN;
 
-  if (!igUserId || !token) {
-    console.log('ℹ️ Instagram sin configurar (falta INSTAGRAM_USER_ID o INSTAGRAM_TOKEN).');
+  if (!igUserId) {
+    console.log('ℹ️ Instagram sin configurar (falta INSTAGRAM_USER_ID).');
     return { ok: false, motivo: 'sin_configurar' };
+  }
+
+  // El token se le pide al módulo que lo renueva: puede venir de la variable de
+  // entorno (semilla) o del bucket privado, ya renovado. Ver instagramToken.js.
+  const token = await obtenerTokenInstagram();
+  if (!token) {
+    console.log('ℹ️ Instagram sin token disponible (INSTAGRAM_TOKEN vacío y nada guardado).');
+    return { ok: false, motivo: 'sin_token' };
   }
   if (!videoUrl) {
     return { ok: false, motivo: 'sin_url_de_video' };
@@ -197,4 +209,39 @@ export async function publicarEnInstagram({ videoUrl, caption, title }) {
 
   console.log(`✅ Instagram: Reel publicado (${reel.id})`);
   return { ok: true, id: reel.id, permalink };
+}
+
+/**
+ * Comprueba contra Instagram que el token sirve y con qué cuenta se publicará.
+ *
+ * No devuelve el token, solo el resultado: lo usa el endpoint
+ * /api/instagram/estado para saber si Instagram está listo sin publicar nada.
+ */
+export async function verificarCuentaInstagram() {
+  const igUserId = process.env.INSTAGRAM_USER_ID;
+  if (!igUserId) return { ok: false, motivo: 'sin_configurar' };
+
+  const token = await obtenerTokenInstagram();
+  if (!token) return { ok: false, motivo: 'sin_token' };
+
+  try {
+    const { data } = await axios.get(`${GRAPH}/me`, {
+      timeout: 30000,
+      params: { fields: 'id,username,account_type,media_count', access_token: token },
+    });
+
+    return {
+      ok: true,
+      id: data?.id || null,
+      username: data?.username || null,
+      accountType: data?.account_type || null,
+      mediaCount: data?.media_count ?? null,
+      // Si no coinciden, la app está publicando en una cuenta que no es la
+      // configurada: mejor enterarse por aquí que por un Reel en el perfil
+      // equivocado.
+      coincideConLaConfigurada: data?.id === igUserId,
+    };
+  } catch (error) {
+    return { ok: false, motivo: error.response?.data?.error?.message || error.message };
+  }
 }

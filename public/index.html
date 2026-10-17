@@ -29,6 +29,7 @@
       <button class="nav-btn" data-tab="library-tab">📁 Biblioteca</button>
       <button class="nav-btn" data-tab="videos-tab" style="background:linear-gradient(135deg,rgba(124,58,237,0.3),rgba(168,85,247,0.3)); border-color:rgba(168,85,247,0.5);">🚀 Mis Videos</button>
       <button class="nav-btn" data-tab="tiktok-tab" style="background:linear-gradient(135deg,rgba(0,229,255,0.25),rgba(254,44,85,0.25)); border-color:rgba(0,229,255,0.45);">🎵 TikTok</button>
+      <button class="nav-btn" data-tab="modelos-tab" style="background:linear-gradient(135deg,rgba(16,185,129,0.25),rgba(56,189,248,0.25)); border-color:rgba(16,185,129,0.45);">🤖 Modelos</button>
     </nav>
   </header>
 
@@ -215,6 +216,21 @@
     </section>
 
   </main>
+
+  <!-- Modal: qué modelos de OpenCode están disponibles -->
+  <div id="modelos-modal" class="modal-overlay" style="display:none;">
+    <div class="modal-caja">
+      <button class="modal-cerrar" onclick="cerrarModalModelos()" title="Cerrar (Esc)">✕</button>
+      <h2 style="font-size:1.15rem; margin-bottom:0.4rem;">🤖 ¿Qué modelo puedo usar?</h2>
+      <p class="modal-sub">
+        Lo calcula el probador de tu PC. Para saber si ya volvieron los que están agotados,
+        corre <b>Probar-modelos.bat</b> y vuelve a abrir esta ventana.
+      </p>
+      <div id="modelos-contenido">
+        <div class="loading-spinner">Cargando el estado de los modelos...</div>
+      </div>
+    </div>
+  </div>
 
   <!-- Notificaciones Toast -->
   <div id="toast" class="toast"></div>

@@ -171,16 +171,30 @@ $errores  = $modelos.Count - $ok - $limitados
 
 $objeto = [ordered]@{
     ultimaComprobacion = $cuando
-    total     = $modelos.Count
-    ok        = $ok
-    limitados = $limitados
-    errores   = $errores
-    modelos   = $resultados
+    resumen = [ordered]@{
+        total     = $modelos.Count
+        ok        = $ok
+        limitados = $limitados
+        errores   = $errores
+    }
+    modelos = $resultados
 }
 $json = $objeto | ConvertTo-Json -Depth 6
 $carpeta = Split-Path $archivoEstado
 if (-not (Test-Path $carpeta)) { New-Item -ItemType Directory -Force -Path $carpeta | Out-Null }
 Set-Content -Path $archivoEstado -Value $json -Encoding UTF8
+
+# Subir el resultado al bucket: la app corre en Cloud Run y no puede hablar
+# con el servicio de OpenCode del PC, asi que el estado viaja por aqui y el
+# modal "Modelos" de la web lo lee de ahi.
+$bucket = $env:GCS_BUCKET_VIDEOS
+if (-not $bucket) { $bucket = 'ciencia-cool-videos-271857970093' }
+try {
+    & gcloud storage cp $archivoEstado "gs://$bucket/estado/modelos.json" --quiet 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) { Write-Host '  Subido al bucket: la web ya puede mostrarlo.' }
+} catch {
+    Write-Host '  (No se pudo subir al bucket; la web no vera el estado hasta la proxima vez.)' -ForegroundColor Yellow
+}
 
 Write-Host ''
 Write-Host '  ------------------------------------------------------------'

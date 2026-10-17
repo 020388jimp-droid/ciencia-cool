@@ -27,11 +27,14 @@ function setupTabs() {
 
   navBtns.forEach(btn => {
     btn.addEventListener('click', () => {
+      const targetId = btn.getAttribute('data-tab');
+      // "Modelos" no es una pestaña: abre una ventana aparte (modal).
+      if (targetId === 'modelos-tab') { abrirModalModelos(); return; }
+
       navBtns.forEach(b => b.classList.remove('active'));
       panes.forEach(p => p.classList.remove('active'));
 
       btn.classList.add('active');
-      const targetId = btn.getAttribute('data-tab');
       const targetPane = document.getElementById(targetId);
       if (targetPane) targetPane.classList.add('active');
 
@@ -1085,3 +1088,133 @@ function escaparHtml(texto) {
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[c]));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODAL: qué modelos de OpenCode están disponibles
+//
+// El estado lo escribe el probador de tu PC (Probar-modelos.bat); aquí solo se
+// lee. La ventana se abre con el botón "Modelos" de la barra de arriba y se
+// cierra con la X de la esquina, con la tecla Esc o tocando el fondo.
+// ─────────────────────────────────────────────────────────────────────────────
+
+window.abrirModalModelos = async function() {
+  const overlay = document.getElementById('modelos-modal');
+  if (!overlay) return;
+  overlay.style.display = 'flex';
+  await cargarEstadoModelos();
+};
+
+window.cerrarModalModelos = function() {
+  const overlay = document.getElementById('modelos-modal');
+  if (overlay) overlay.style.display = 'none';
+};
+
+// Se cierra con Esc o tocando el fondo (fuera de la caja).
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('modelos-modal')?.addEventListener('click', (e) => {
+    if (e.target.id === 'modelos-modal') cerrarModalModelos();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') cerrarModalModelos();
+  });
+});
+
+async function cargarEstadoModelos() {
+  const cont = document.getElementById('modelos-contenido');
+  if (!cont) return;
+  cont.innerHTML = '<div class="loading-spinner">Cargando el estado de los modelos...</div>';
+
+  try {
+    const res = await fetch(`/api/modelos/estado?t=${Date.now()}`);
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error || 'Error del servidor');
+    cont.innerHTML = data.estado
+      ? htmlEstadoModelos(data.estado)
+      : htmlModelosSinProbar();
+  } catch (error) {
+    cont.innerHTML = `<p style="color:var(--danger)">No se pudo cargar: ${escaparHtml(error.message)}</p>`;
+  }
+}
+
+const COLORES_MODELOS = {
+  ok: 'background:rgba(16,185,129,0.18); color:#34d399; border:1px solid rgba(16,185,129,0.4);',
+  limitado: 'background:rgba(245,158,11,0.16); color:#fbbf24; border:1px solid rgba(245,158,11,0.4);',
+  'sin respuesta': 'background:rgba(249,115,22,0.16); color:#fb923c; border:1px solid rgba(249,115,22,0.4);',
+  error: 'background:rgba(239,68,68,0.16); color:#f87171; border:1px solid rgba(239,68,68,0.4);',
+};
+
+const ETIQUETAS_MODELOS = {
+  ok: 'funciona',
+  limitado: 'límite agotado',
+  'sin respuesta': 'no contestó',
+  error: 'error',
+};
+
+function htmlEstadoModelos(estado) {
+  const r = estado.resumen || {};
+  const filas = Object.entries(estado.modelos || {});
+  if (!filas.length) return '<p style="color:var(--text-dim)">No hay datos todavía.</p>';
+
+  const hora = new Date(estado.ultimaComprobacion).toLocaleString('es-MX', {
+    timeZone: 'America/Mexico_City',
+    day: '2-digit',
+    month: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+
+  const chips = `
+    <div class="modelos-resumen">
+      <span class="modelos-chip" style="${COLORES_MODELOS.ok}">${r.ok || 0} funcionando</span>
+      <span class="modelos-chip" style="${COLORES_MODELOS.limitado}">${r.limitados || 0} con límite</span>
+      <span class="modelos-chip" style="${COLORES_MODELOS.error}">${r.errores || 0} con error</span>
+      <span class="modelos-chip" style="background:rgba(56,189,248,0.14); color:#38bdf8; border:1px solid rgba(56,189,248,0.35);">comprobado el ${hora}</span>
+    </div>
+  `;
+
+  const lista = filas.map(([id, m]) => {
+    const color = COLORES_MODELOS[m.estado] || COLORES_MODELOS.error;
+    const etiqueta = ETIQUETAS_MODELOS[m.estado] || m.estado;
+    const detalle = m.detalle ? `<div class="modelo-detalle">${escaparHtml(m.detalle)}</div>` : '';
+    return `
+      <div class="modelo-fila">
+        <div>
+          <div class="modelo-nombre">${escaparHtml(m.nombre || id)}</div>
+          ${detalle}
+        </div>
+        <span class="modelo-estado" style="${color}">${etiqueta}</span>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    ${chips}
+    <div class="modelos-lista">${lista}</div>
+    <div class="modelos-acciones">
+      <button class="btn btn-secondary" onclick="copiarComandoModelos()">📋 Copiar comando del probador</button>
+      <button class="btn btn-secondary" onclick="cerrarModalModelos()">Cerrar</button>
+    </div>
+    <p class="tiktok-aviso" style="margin-top:0.8rem;">💡 Los límites van rotando: un modelo que hoy está agotado puede volver en minutos. Para saberlo, corre <b>Probar-modelos.bat</b> (doble clic) y vuelve a abrir esta ventana.</p>
+  `;
+}
+
+function htmlModelosSinProbar() {
+  return `
+    <p style="margin-bottom:0.8rem;">Todavía no se ha comprobado ningún modelo.</p>
+    <p class="modal-sub" style="margin-bottom:1rem;">Dale doble clic a <b>Probar-modelos.bat</b> (en la carpeta del proyecto) y espera a que termine. Después vuelve a abrir esta ventana.</p>
+    <div class="modelos-acciones">
+      <button class="btn btn-secondary" onclick="copiarComandoModelos()">📋 Copiar comando del probador</button>
+      <button class="btn btn-secondary" onclick="cerrarModalModelos()">Cerrar</button>
+    </div>
+  `;
+}
+
+window.copiarComandoModelos = async function() {
+  const cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\\probar-modelos.ps1"';
+  try {
+    await copiarAlPortapapeles(cmd);
+    showToast('📋 Comando copiado. Pégalo en una terminal (PowerShell) y correlo.');
+  } catch (error) {
+    showToast('No se pudo copiar: ' + error.message, true);
+  }
+};

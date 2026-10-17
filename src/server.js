@@ -18,6 +18,7 @@ import { ejecutarPipeline, estadoPipeline, limpiarVideosPublicados } from './ser
 import { verificarCuentaInstagram } from './services/instagramService.js';
 import { estadoTokenInstagram } from './services/instagramToken.js';
 import { pendientesTikTok, registrarTextosTikTok, horariosTikTok } from './services/tiktokTextos.js';
+import { leerEstadoModelos } from './services/modelosEstado.js';
 
 dotenv.config();
 
@@ -513,6 +514,22 @@ app.get('/api/tiktok/textos', async (req, res) => {
     res.json({ success: true, ...pendiente, horarios: horariosTikTok() });
   } catch (error) {
     console.error('Error en /api/tiktok/textos:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// API: qué modelos de OpenCode están disponibles ahora mismo.
+//
+// Lo escribió el probador local (scripts/probar-modelos.ps1): la app corre en
+// Cloud Run y no puede hablar con el servicio de OpenCode del PC, así que el
+// resultado vive en el bucket y aquí solo se lee. No lleva clave: es el estado
+// del plan, no información del proyecto.
+app.get('/api/modelos/estado', async (req, res) => {
+  try {
+    const estado = await leerEstadoModelos();
+    res.json({ success: true, estado });
+  } catch (error) {
+    console.error('Error en /api/modelos/estado:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });

@@ -70,7 +70,11 @@ export function redirectUriTikTok() {
 export function urlAutorizacionTikTok(state) {
   const params = new URLSearchParams({
     client_key: (process.env.TIKTOK_CLIENT_KEY || '').trim(),
-    scope: 'user.info.basic,video.upload',
+    // Solo el permiso de subida. El de leer el perfil (user.info.basic) es
+    // opcional y TikTok lo muestra como un interruptor aparte que se queda
+    // apagado: pedirlo solo confundía la pantalla de autorización y hacía
+    // fallar la comprobación de la cuenta. No lo necesitamos para nada.
+    scope: 'video.upload',
     response_type: 'code',
     redirect_uri: redirectUriTikTok(),
     state,
@@ -298,27 +302,41 @@ export async function guardarEstadoOauth(state) {
 }
 
 /**
- * Comprueba el "state" que vuelve de TikTok y lo gasta (se borra siempre, para
- * que el mismo enlace no sirva dos veces). Devuelve true solo si coincide y
- * tiene menos de 15 minutos.
+ * Comprueba el "state" que vuelve de TikTok.
+ *
+ * Devuelve:
+ *   'nuevo'    → es el vale que acaba de emitir la app: hay que canjear el código.
+ *   'repetido' → es el mismo vale, pero ya se usó: la conexión ya se hizo. Pasa
+ *                cuando el navegador manda la dirección dos veces (o el usuario
+ *                vuelve atrás y reenvía). En vez de un "el enlace caducó"
+ *                desconcertante, se le dice que ya quedó conectado.
+ *   'invalido' → no es nuestro vale, o ya pasaron más de 15 minutos.
  */
-export async function consumirEstadoOauth(state) {
+export async function revisarEstadoOauth(state) {
   const archivo = storage.bucket(BUCKET_SECRETOS).file(RUTA_ESTADO);
+
   try {
     const [contenido] = await archivo.download();
     const datos = JSON.parse(contenido.toString('utf8').replace(/^\uFEFF/, ''));
 
-    // Se borra siempre: es de un solo uso, coincida o no.
-    await archivo.delete().catch(() => {});
-
-    if (!datos?.state || datos.state !== state) return false;
-
     const minutos = (Date.now() - Date.parse(datos.creado)) / 60000;
-    return Number.isFinite(minutos) && minutos >= 0 && minutos <= MINUTOS_VALIDEZ_ESTADO;
+    const vigente = Number.isFinite(minutos) && minutos >= 0 && minutos <= MINUTOS_VALIDEZ_ESTADO;
+
+    if (!datos?.state || datos.state !== state || !vigente) return 'invalido';
+    if (datos.usado) return 'repetido';
+
+    // Se marca como usado (no se borra): así un segundo envío del mismo enlace
+    // encuentra el vale gastado y puede decir "ya quedó" en vez de "caducó".
+    await archivo.save(
+      JSON.stringify({ ...datos, usado: new Date().toISOString() }, null, 2),
+      { contentType: 'application/json', resumable: false }
+    );
+
+    return 'nuevo';
   } catch (error) {
     if (error.code !== 404) {
       console.error('No se pudo comprobar el state de TikTok:', error.message);
     }
-    return false;
+    return 'invalido';
   }
 }

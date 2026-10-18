@@ -22,14 +22,14 @@ import { pendientesTikTok, registrarTextosTikTok, horariosTikTok } from './servi
 import { leerEstadoModelos } from './services/modelosEstado.js';
 import {
   configuradoTikTok,
-  consumirEstadoOauth,
   estadoTokenTikTok,
   guardarEstadoOauth,
   intercambiarCodigoTikTok,
   redirectUriTikTok,
+  revisarEstadoOauth,
   urlAutorizacionTikTok,
 } from './services/tiktokToken.js';
-import { verificarCuentaTikTok } from './services/tiktokService.js';
+import { subirVideoABandeja, ultimoVideoEnBucket, verificarCuentaTikTok } from './services/tiktokService.js';
 import { esFirmaDeSitio, leerFirmaDeSitio } from './services/verificacionSitio.js';
 
 dotenv.config();
@@ -587,10 +587,18 @@ app.get('/api/tiktok/callback', async (req, res) => {
       .send(paginaTikTok('❌ El enlace llegó incompleto', 'Vuelve a pedir el enlace de autorización desde la app.', ''));
   }
 
-  if (!(await consumirEstadoOauth(String(state)))) {
+  const revision = await revisarEstadoOauth(String(state));
+
+  if (revision === 'invalido') {
     return res
       .status(400)
       .send(paginaTikTok('❌ El enlace caducó', 'Pasaron más de 15 minutos (o ya se había usado). Pide un enlace nuevo.', ''));
+  }
+
+  if (revision === 'repetido') {
+    return res.send(
+      paginaTikTok('✅ TikTok ya estaba conectado', 'Este enlace ya se había usado antes y la conexión quedó hecha.', '')
+    );
   }
 
   try {
@@ -624,6 +632,12 @@ app.get('/api/tiktok/estado', async (req, res) => {
 
   try {
     const [token, cuenta] = await Promise.all([estadoTokenTikTok(), verificarCuentaTikTok()]);
+
+    // El único permiso que pedimos es el de subir videos. Si el nombre de la
+    // cuenta no se puede leer es porque no pedimos el permiso de perfil: eso no
+    // impide subir, así que no debe contar como "no listo".
+    const faltaPermisoDePerfil = !cuenta.ok && /authorize the scope/i.test(cuenta.error || '');
+
     return res.json({
       success: true,
       configurado: configuradoTikTok(),
@@ -631,10 +645,39 @@ app.get('/api/tiktok/estado', async (req, res) => {
       modo: 'bandeja: el video cae en la bandeja de la cuenta y se publica desde la app del teléfono (semi-automático).',
       token,
       cuenta,
-      listo: cuenta.ok === true,
+      aviso: faltaPermisoDePerfil
+        ? 'Sin el permiso de perfil (que no pedimos a propósito) no se puede leer el nombre de la cuenta; para subir videos no hace falta.'
+        : null,
+      listo: token.hayToken === true,
     });
   } catch (error) {
     console.error('Error en /api/tiktok/estado:', error.message);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// API: probar la subida a la bandeja de TikTok.
+//
+// Deja el video como BORRADOR en la bandeja de la cuenta: no publica nada al
+// público. Sirve para comprobar el camino completo sin esperar a que se genere
+// el siguiente video. Usa el video más reciente que siga en el bucket, o el que
+// se indique con ?archivo=nombre.mp4.
+app.post('/api/tiktok/probar', async (req, res) => {
+  if (!claveValida(req.get('X-Pipeline-Key'))) {
+    console.warn(`🚫 Acceso denegado a /api/tiktok/probar desde ${req.ip}`);
+    return res.status(401).json({ success: false, error: 'Clave inválida o ausente (header X-Pipeline-Key).' });
+  }
+
+  try {
+    const archivo = String(req.query.archivo || '').trim() || (await ultimoVideoEnBucket());
+    if (!archivo) {
+      return res.status(404).json({ success: false, error: 'No hay videos en el bucket para probar.' });
+    }
+
+    const resultado = await subirVideoABandeja(archivo);
+    return res.status(resultado.ok ? 200 : 502).json({ success: resultado.ok === true, archivo, resultado });
+  } catch (error) {
+    console.error('Error en /api/tiktok/probar:', error.message);
     return res.status(500).json({ success: false, error: error.message });
   }
 });

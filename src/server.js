@@ -3,6 +3,7 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import dotenv from 'dotenv';
+import { randomBytes } from 'crypto';
 import { fileURLToPath } from 'url';
 
 import { fetchAllNews, getNewsCacheStats } from './services/newsService.js';
@@ -19,6 +20,16 @@ import { verificarCuentaInstagram } from './services/instagramService.js';
 import { estadoTokenInstagram } from './services/instagramToken.js';
 import { pendientesTikTok, registrarTextosTikTok, horariosTikTok } from './services/tiktokTextos.js';
 import { leerEstadoModelos } from './services/modelosEstado.js';
+import {
+  configuradoTikTok,
+  consumirEstadoOauth,
+  estadoTokenTikTok,
+  guardarEstadoOauth,
+  intercambiarCodigoTikTok,
+  redirectUriTikTok,
+  urlAutorizacionTikTok,
+} from './services/tiktokToken.js';
+import { verificarCuentaTikTok } from './services/tiktokService.js';
 
 dotenv.config();
 
@@ -39,6 +50,11 @@ app.use(express.json());
 app.use(express.static(path.join(projectRoot, 'public')));
 app.use('/audio', express.static(path.join(projectRoot, 'outputs', 'audio')));
 app.use('/media', express.static(path.join(projectRoot, 'outputs', 'media')));
+
+// Términos y privacidad: TikTok (y Meta) los piden como requisito para
+// registrar la app de publicación. Son páginas fijas, sin datos personales.
+app.get('/terminos', (req, res) => res.sendFile(path.join(projectRoot, 'public', 'terminos.html')));
+app.get('/privacidad', (req, res) => res.sendFile(path.join(projectRoot, 'public', 'privacidad.html')));
 
 // Servir videos con soporte para HTTP Range Requests (indispensable para
 // previsualizar <video> en el navegador — permite scrubbing / seek)
@@ -497,6 +513,151 @@ app.get('/api/instagram/estado', async (req, res) => {
     return res.status(500).json({ success: false, error: error.message });
   }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TikTok: conectar la cuenta (se hace una sola vez).
+//
+// Se usa OAuth porque TikTok no da tokens eternos: el usuario entra con su
+// cuenta, acepta, y TikTok devuelve un código que se canjea por el par de
+// tokens (se guardan en el bucket privado, ver tiktokToken.js).
+//
+// El POST lleva clave para que nadie más pueda iniciar el proceso: si un
+// desconocido lo iniciara y autorizara con SU cuenta, la app acabaría subiendo
+// los videos a la cuenta equivocada.
+// ─────────────────────────────────────────────────────────────────────────────
+app.post('/api/tiktok/autorizar', async (req, res) => {
+  if (!claveValida(req.get('X-Pipeline-Key'))) {
+    console.warn(`🚫 Acceso denegado a /api/tiktok/autorizar desde ${req.ip}`);
+    return res.status(401).json({ success: false, error: 'Clave inválida o ausente (header X-Pipeline-Key).' });
+  }
+
+  if (!configuradoTikTok()) {
+    return res.status(503).json({
+      success: false,
+      error: 'Faltan TIKTOK_CLIENT_KEY y TIKTOK_CLIENT_SECRET en Cloud Run. Se ponen cuando el portal de TikTok te dé las llaves.',
+    });
+  }
+
+  try {
+    const state = randomBytes(24).toString('hex');
+    await guardarEstadoOauth(state);
+    return res.json({
+      success: true,
+      url: urlAutorizacionTikTok(state),
+      redireccion: redirectUriTikTok(),
+      como:
+        'Abre el enlace en el navegador, entra con @cienciacoolmx y acepta. ' +
+        'El enlace vale 15 minutos y sirve una sola vez.',
+    });
+  } catch (error) {
+    console.error('Error en /api/tiktok/autorizar:', error.message);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Aquí vuelve TikTok después de que el usuario acepta. No lleva clave (TikTok
+// no puede mandar cabeceras): la protección es el "state" de un solo uso.
+app.get('/api/tiktok/callback', async (req, res) => {
+  const { code, state, error, error_description } = req.query;
+
+  if (error) {
+    return res
+      .status(400)
+      .send(paginaTikTok('❌ No se autorizó', 'TikTok no dio el permiso o se cerró la ventana.', String(error_description || error)));
+  }
+
+  if (!code || !state) {
+    return res
+      .status(400)
+      .send(paginaTikTok('❌ El enlace llegó incompleto', 'Vuelve a pedir el enlace de autorización desde la app.', ''));
+  }
+
+  if (!(await consumirEstadoOauth(String(state)))) {
+    return res
+      .status(400)
+      .send(paginaTikTok('❌ El enlace caducó', 'Pasaron más de 15 minutos (o ya se había usado). Pide un enlace nuevo.', ''));
+  }
+
+  try {
+    await intercambiarCodigoTikTok(String(code));
+    const cuenta = await verificarCuentaTikTok();
+
+    return res.send(
+      paginaTikTok(
+        '✅ TikTok conectado',
+        cuenta.ok
+          ? `La app ya puede mandar videos a la bandeja de @${cuenta.username}.`
+          : 'Los tokens se guardaron, pero no se pudo leer el nombre de la cuenta.',
+        cuenta.ok ? `Cuenta: ${cuenta.nombre || cuenta.username}` : cuenta.error
+      )
+    );
+  } catch (error) {
+    console.error('Error en /api/tiktok/callback:', error.message);
+    return res
+      .status(502)
+      .send(paginaTikTok('❌ No se pudo conectar', 'TikTok rechazó el código. Vuelve a intentarlo con un enlace nuevo.', error.message));
+  }
+});
+
+// API: ¿Está TikTok listo? No sube nada: solo dice qué token hay y con qué
+// cuenta se publicaría. Nunca devuelve el token.
+app.get('/api/tiktok/estado', async (req, res) => {
+  if (!claveValida(req.get('X-Pipeline-Key'))) {
+    console.warn(`🚫 Acceso denegado a /api/tiktok/estado desde ${req.ip}`);
+    return res.status(401).json({ success: false, error: 'Clave inválida o ausente (header X-Pipeline-Key).' });
+  }
+
+  try {
+    const [token, cuenta] = await Promise.all([estadoTokenTikTok(), verificarCuentaTikTok()]);
+    return res.json({
+      success: true,
+      configurado: configuradoTikTok(),
+      redireccion: redirectUriTikTok(),
+      modo: 'bandeja: el video cae en la bandeja de la cuenta y se publica desde la app del teléfono (semi-automático).',
+      token,
+      cuenta,
+      listo: cuenta.ok === true,
+    });
+  } catch (error) {
+    console.error('Error en /api/tiktok/estado:', error.message);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Página sencilla para cerrar la ventana después de autorizar.
+function paginaTikTok(titulo, mensaje, detalle = '') {
+  return `<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${titulo} · CIENCIA COOL</title>
+  <style>
+    body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+           background:#080c16; color:#e8eefc; font-family:system-ui,-apple-system,"Segoe UI",sans-serif; padding:24px; }
+    .caja { max-width:520px; width:100%; background:rgba(13,18,32,.97); border:1px solid rgba(255,255,255,.1);
+            border-radius:16px; padding:28px; box-shadow:0 20px 60px rgba(0,0,0,.6); text-align:center; }
+    h1 { font-size:1.25rem; margin:0 0 .6rem; }
+    p { color:#9aa8c7; line-height:1.6; margin:.4rem 0; }
+    .detalle { font-size:.85rem; color:#6f7f9f; word-break:break-word; margin-top:.8rem; }
+    a { color:#38bdf8; text-decoration:none; font-weight:600; }
+  </style>
+</head>
+<body>
+  <div class="caja">
+    <h1>${titulo}</h1>
+    <p>${mensaje}</p>
+    ${detalle ? `<p class="detalle">${escaparHtmlServidor(detalle)}</p>` : ''}
+    <p style="margin-top:1.2rem"><a href="/">Volver a CIENCIA COOL</a></p>
+  </div>
+</body>
+</html>`;
+}
+
+// Los mensajes de arriba llevan texto de terceros (TikTok), así que se escapa.
+function escaparHtmlServidor(texto) {
+  return String(texto ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
 
 // API: Textos del video más reciente, listos para copiar y pegar en TikTok.
 //

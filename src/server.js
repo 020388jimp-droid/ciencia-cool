@@ -30,6 +30,7 @@ import {
   urlAutorizacionTikTok,
 } from './services/tiktokToken.js';
 import { verificarCuentaTikTok } from './services/tiktokService.js';
+import { esFirmaDeSitio, leerFirmaDeSitio } from './services/verificacionSitio.js';
 
 dotenv.config();
 
@@ -55,6 +56,20 @@ app.use('/media', express.static(path.join(projectRoot, 'outputs', 'media')));
 // registrar la app de publicación. Son páginas fijas, sin datos personales.
 app.get('/terminos', (req, res) => res.sendFile(path.join(projectRoot, 'public', 'terminos.html')));
 app.get('/privacidad', (req, res) => res.sendFile(path.join(projectRoot, 'public', 'privacidad.html')));
+
+// TikTok comprueba que el sitio es tuyo pidiendo un archivo en la raíz
+// (https://…/tiktokXXXX.txt) con un contenido exacto. Se sirve desde el bucket
+// (ver verificacionSitio.js) para no reconstruir la imagen cada vez que pida
+// uno nuevo. Las demás rutas de un solo nivel siguen su curso normal.
+app.get('/:archivo', async (req, res, next) => {
+  if (!esFirmaDeSitio(req.params.archivo)) return next();
+
+  const contenido = await leerFirmaDeSitio(req.params.archivo);
+  if (contenido === null) {
+    return res.status(404).type('text/plain').send('Archivo de verificación no encontrado');
+  }
+  return res.type('text/plain').send(contenido);
+});
 
 // Servir videos con soporte para HTTP Range Requests (indispensable para
 // previsualizar <video> en el navegador — permite scrubbing / seek)

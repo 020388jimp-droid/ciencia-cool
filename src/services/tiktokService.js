@@ -191,7 +191,9 @@ export async function subirVideoABandeja(nombreArchivo, { log = console.log } = 
     }
 
     log(`🎵 TikTok: video enviado a la bandeja (${Math.round(tamano / 1024 / 1024 * 10) / 10} MB, id ${publishId || 's/n'}).`);
-    return { ok: true, publishId, tamano, modo: 'bandeja' };
+    // "id" es el nombre que espera registrarPublicacion() para anotarlo; publishId
+    // se deja además porque es como lo llama TikTok en su documentación.
+    return { ok: true, id: publishId, publishId, tamano, modo: 'bandeja' };
   } catch (error) {
     return {
       ok: false,

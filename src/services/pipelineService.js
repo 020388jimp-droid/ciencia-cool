@@ -30,6 +30,8 @@ import { elegirNoRepetida } from './dedupService.js';
 import { publicarEnFacebook, facebookConfigurado } from './facebookService.js';
 import { publicarEnInstagram, instagramConfigurado } from './instagramService.js';
 import { registrarTextosTikTok } from './tiktokTextos.js';
+import { subirVideoABandeja } from './tiktokService.js';
+import { configuradoTikTok } from './tiktokToken.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -184,7 +186,7 @@ async function guardarPublicaciones(publicaciones) {
  * Se vuelve a descargar el archivo antes de escribir para no pisar lo que haya
  * anotado otra instancia mientras tanto.
  */
-async function registrarPublicacion(archivo, red, resultado, extras = {}) {
+export async function registrarPublicacion(archivo, red, resultado, extras = {}) {
   if (!archivo) return;
   try {
     const publicaciones = await descargarPublicaciones();
@@ -291,6 +293,49 @@ async function publicarPendientesEnInstagram(log = console.log) {
     return resultados;
   } catch (error) {
     console.error('No se pudieron reintentar los Reels pendientes:', error.message);
+    return [];
+  }
+}
+
+/**
+ * Reintenta mandar a la bandeja de TikTok los videos que no llegaron.
+ *
+ * TikTok es la única red semi-automática del proyecto: el video cae como
+ * BORRADOR en la bandeja de la cuenta y la persona lo publica desde el
+ * teléfono. Por eso aquí "publicado" significa "entregado a la bandeja": el
+ * borrador ya vive dentro de TikTok, así que la copia del bucket puede irse.
+ *
+ * Si el envío falló (internet, token vencido, TikTok caído), el video sigue en
+ * el bucket y se reintenta en la siguiente pasada en vez de perderse.
+ *
+ * @returns {Promise<Array<{archivo: string, ok: boolean, motivo?: string}>>}
+ */
+async function publicarPendientesEnTikTok(log = console.log) {
+  if (!configuradoTikTok()) return [];
+
+  try {
+    const publicaciones = await descargarPublicaciones();
+    const pendientes = Object.entries(publicaciones)
+      .filter(([, ficha]) => ficha?.tiktok?.ok === false)
+      .map(([archivo]) => archivo);
+
+    if (!pendientes.length) return [];
+
+    log(`♻️ ${pendientes.length} video(s) sin llegar a la bandeja de TikTok: se reintenta.`);
+    const resultados = [];
+
+    for (const archivo of pendientes) {
+      const resultado = await subirVideoABandeja(archivo, { log });
+      await registrarPublicacion(archivo, 'tiktok', resultado);
+      resultados.push({ archivo, ...resultado });
+      log(resultado.ok
+        ? `♻️ Reintento en TikTok OK: ${archivo}`
+        : `⚠️ Reintento en TikTok falló (${archivo}): ${resultado.motivo}${resultado.detalle ? ` — ${resultado.detalle}` : ''}`);
+    }
+
+    return resultados;
+  } catch (error) {
+    console.error('No se pudieron reintentar los envíos a TikTok:', error.message);
     return [];
   }
 }
@@ -424,15 +469,23 @@ export async function limpiarVideosPublicados() {
     const publicaciones = await descargarPublicaciones();
 
     // ── Regla de oro: no borrar lo que no se publicó en todas las redes ──────
-    // Si Facebook o Instagram fallaron, el video se queda en el bucket y se
-    // reintenta en la siguiente pasada (ver publicarPendientesEnFacebook y
-    // publicarPendientesEnInstagram). Las redes que no están configuradas no
-    // anotan ficha, así que no frenan el borrado; los videos viejos, anteriores
-    // a esta función, tampoco tienen ficha: se dan por publicados.
+    // Si Facebook, Instagram o TikTok fallaron, el video se queda en el bucket y
+    // se reintenta en la siguiente pasada (ver publicarPendientesEnFacebook,
+    // publicarPendientesEnInstagram y publicarPendientesEnTikTok). Las redes que
+    // no están configuradas no anotan ficha, así que no frenan el borrado; los
+    // videos viejos, anteriores a esta función, tampoco tienen ficha: se dan por
+    // publicados.
+    //
+    // En TikTok no se espera a que la persona le dé "Publicar" en el teléfono
+    // (podrían pasar días). Lo que se anota es que el video YA llegó a su
+    // bandeja: a partir de ahí el borrador vive dentro de TikTok y la copia del
+    // bucket sobra.
     const candidatos = videos.slice(0, -1).map(f => f.name);
     const pendientes = candidatos.filter((nombre) => {
       const ficha = publicaciones[nombre];
-      return ficha?.facebook?.ok === false || ficha?.instagram?.ok === false;
+      return ficha?.facebook?.ok === false
+        || ficha?.instagram?.ok === false
+        || ficha?.tiktok?.ok === false;
     });
     const sobran = candidatos.filter(nombre => !pendientes.includes(nombre));
 
@@ -805,11 +858,12 @@ export async function ejecutarPipeline(opts = {}) {
     };
 
     // ── Reintentos pendientes ────────────────────────────────────────────────
-    // Si en una pasada anterior Facebook o Instagram fallaron, ese video sigue
-    // en el bucket. Se reintentan AHORA, antes de generar uno nuevo, para no
-    // perderlos.
+    // Si en una pasada anterior Facebook, Instagram o TikTok fallaron, ese video
+    // sigue en el bucket. Se reintentan AHORA, antes de generar uno nuevo, para
+    // no perderlos.
     await publicarPendientesEnFacebook(log);
     await publicarPendientesEnInstagram(log);
+    await publicarPendientesEnTikTok(log);
 
     // ── 1. Noticia ────────────────────────────────────────────────────────────
     let paso = Date.now();
@@ -970,6 +1024,7 @@ export async function ejecutarPipeline(opts = {}) {
     log('Subiendo el video a Google Cloud Storage...');
     let facebook = null;
     let instagram = null;
+    let tiktok = null;
     const urlGcs = stat.size > 0
       ? await subirAGcs(resultado.videoPath, resultado.filename)
       : null;
@@ -1067,6 +1122,39 @@ export async function ejecutarPipeline(opts = {}) {
       } else {
         log('ℹ️ Instagram sin configurar: se omite (revisa INSTAGRAM_USER_ID e INSTAGRAM_TOKEN).');
       }
+
+      // ── TikTok (bandeja) ──────────────────────────────────────────────────
+      // TikTok no aprueba que una app publique sola con un temporizador (hay
+      // que pedir auditoría y la rechazan para uso personal), así que aquí no
+      // se publica: el video se ENTREGA a la bandeja de la cuenta y la persona
+      // le da "Publicar" desde la app del teléfono. Ese último toque es
+      // humano, pero el resto es automático.
+      //
+      // Va al final a propósito: es el paso más pesado (sube hasta 20 MB) y el
+      // menos urgente. Si se pasara del tiempo que aguanta Cloud Run, el video
+      // ya quedó en Facebook e Instagram y el envío a TikTok se reintenta en la
+      // siguiente pasada sin repetir nada.
+      //
+      // El borrador se publica con el título y la descripción que la persona
+      // copia de la pestaña "TikTok" de la web: la API de bandeja no acepta
+      // texto, el caption lo escribe ella en el teléfono.
+      if (configuradoTikTok()) {
+        paso = Date.now();
+        log('Enviando el video a la bandeja de TikTok...');
+        tiktok = await subirVideoABandeja(resultado.filename, { log });
+        await registrarPublicacion(resultado.filename, 'tiktok', tiktok, {
+          titulo: pub.titulo,
+          descripcion: pub.descripcion,
+        });
+        if (tiktok.ok) {
+          log('✅ TikTok: borrador entregado a la bandeja. Publícalo desde la app del teléfono.');
+        } else {
+          log(`⚠️ TikTok falló (${tiktok.motivo}). El video NO se borrará del bucket: se reintentará en la siguiente pasada.`);
+        }
+        marcar('envío a TikTok', paso);
+      } else {
+        log('ℹ️ TikTok sin configurar: se omite (revisa TIKTOK_CLIENT_KEY y TIKTOK_CLIENT_SECRET).');
+      }
     } else {
       log('No se pudo subir a GCS; se devuelve la URL de Cloud Run (temporal).');
     }
@@ -1094,6 +1182,7 @@ export async function ejecutarPipeline(opts = {}) {
       sceneCount: (script.scenes || []).length,
       facebook,
       instagram,
+      tiktok,
       tiempos,
     };
 

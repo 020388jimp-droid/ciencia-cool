@@ -15,7 +15,7 @@ import { saveScript } from './services/storageService.js';
 import { generateAudioForScript, AVAILABLE_VOICES, DEFAULT_VOICE_ID } from './services/ttsService.js';
 import { findMediaForScenes } from './services/mediaService.js';
 import { renderFinalVideo, buildRenderScenes } from './services/videoRenderService.js';
-import { ejecutarPipeline, estadoPipeline, limpiarVideosPublicados } from './services/pipelineService.js';
+import { ejecutarPipeline, estadoPipeline, limpiarVideosPublicados, registrarPublicacion } from './services/pipelineService.js';
 import { verificarCuentaInstagram } from './services/instagramService.js';
 import { estadoTokenInstagram } from './services/instagramToken.js';
 import { pendientesTikTok, registrarTextosTikTok, horariosTikTok } from './services/tiktokTextos.js';
@@ -332,6 +332,22 @@ app.post('/api/pipeline-completo', async (req, res) => {
         noticia: String(existente.newsTitle || titulo),
       });
 
+      // TikTok: por este camino también se entrega el video a la bandeja, para
+      // que la regla "no borrar hasta publicar en todas las redes" siga siendo
+      // cierta. Si falla, queda anotado y el pipeline lo reintenta en la
+      // siguiente pasada (el video no se borra del bucket mientras siga
+      // pendiente).
+      const archivoExistente = url.split('/').pop();
+      let tiktokExistente = null;
+      if (configuradoTikTok()) {
+        tiktokExistente = await subirVideoABandeja(archivoExistente, { log: (m) => pasos.push(String(m)) });
+        await registrarPublicacion(archivoExistente, 'tiktok', tiktokExistente, { titulo, descripcion });
+        pasos.push(tiktokExistente.ok
+          ? '✅ TikTok: borrador entregado a la bandeja (se publica desde el teléfono).'
+          : `⚠️ TikTok falló (${tiktokExistente.motivo}): se reintentará en la siguiente pasada.`);
+      } else {
+        pasos.push('ℹ️ TikTok sin configurar: se omite.');
+      }
 
       return res.json({
         success: true,
@@ -354,6 +370,7 @@ app.post('/api/pipeline-completo', async (req, res) => {
           jobId: req.body?.jobId || null,
           reutilizado: true,
           videoExistente: true,
+          tiktok: tiktokExistente,
         },
       });
     }

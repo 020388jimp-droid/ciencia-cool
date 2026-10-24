@@ -522,11 +522,16 @@ export async function renderFinalVideo({
       const ini = Number(gesto.ini) || 0;
       const fin = Number(gesto.fin) || 0;
 
-      // Un cuarto del largo del video. La pizarra viene en horizontal (677x369), así
-      // que con la misma altura ocuparía casi todo el ancho y taparía el video;
-      // se le da algo menos para que proportione.
+      // Un cuarto del largo del video (1920/4 = 480 px). Todos los PNG están
+      // recortados al robot, así que con la misma altura todos los gestos se ven
+      // del mismo tamaño y pegados al mismo margen.
+      //
+      // Antes la pizarra se dibujaba a 360 px porque su PNG venía en horizontal
+      // (677x369) con mucho aire transparente: el robot salía ~40% más chico y
+      // desplazado hacia la izquierda. Se recortó el PNG a 163x300 (el robot
+      // ocupa el 93% del alto, igual que los demás), así que ya no necesita un
+      // caso especial.
       const ALTO = 480;
-      const alto = gesto.nombre === 'pizarra' ? 360 : 480;
 
       // Los dos fundidos van en el MISMO filtro, separados por coma:
       // `fade=t=in:...,fade=t=out:...`. Si se escribe `fade=t=in:...:fade=t=out`
@@ -548,7 +553,7 @@ export async function renderFinalVideo({
       // `alpha=1` lo que se desvanece es la transparencia, así que el robot
       // aparece y desaparece suavemente sobre el video.
       filterParts.push(
-        `[${gIdx}:v]scale=-1:${alto},format=rgba,` +
+        `[${gIdx}:v]scale=-1:${ALTO},format=rgba,` +
         `fade=t=in:st=${ini.toFixed(2)}:d=0.28:alpha=1,` +
         `fade=t=out:st=${Math.max(ini + 0.3, fin - 0.28).toFixed(2)}:d=0.28:alpha=1[g_${gIdx}]`
       );

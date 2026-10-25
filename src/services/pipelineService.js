@@ -32,6 +32,7 @@ import { publicarEnInstagram, instagramConfigurado } from './instagramService.js
 import { registrarTextosTikTok } from './tiktokTextos.js';
 import { subirVideoABandeja } from './tiktokService.js';
 import { configuradoTikTok } from './tiktokToken.js';
+import { reservarPasada, marcarPasadaOk, marcarPasadaFallo } from './pipelineCandado.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -590,6 +591,22 @@ export function estadoPipeline() {
   return { enCurso, enCola, maxConcurrentes: MAX_CONCURRENTES, maxCola: MAX_EN_COLA };
 }
 
+/**
+ * Envuelve una pasada con el candado persistente: si termina bien, lo marca
+ * como "ok" (y las siguientes pasadas se rechazan durante la ventana de
+ * espera); si falla, lo marca como "fallo" para poder reintentar de inmediato.
+ */
+async function conCandado(reserva, tarea) {
+  try {
+    const data = await tarea();
+    await marcarPasadaOk(reserva, data?.videoFilename || null);
+    return data;
+  } catch (error) {
+    await marcarPasadaFallo(reserva, error.message);
+    throw error;
+  }
+}
+
 // ─── Caché de resultados por jobId ──────────────────────────────────────────
 //
 // Si n8n reintenta (una caída de red, un timeout) volvería a generar y a
@@ -794,6 +811,7 @@ function construirPublicacion(script, noticia) {
  * @param {boolean} [opts.dryRun]          valida y devuelve el plan sin generar nada
  * @param {boolean} [opts.borrarAnteriores] borra ya los videos anteriores (por defecto
  *                                          no: se borran al publicar, ver publicado-y-limpiar)
+ * @param {boolean} [opts.forzar]          ignora el candado anti-duplicados (pruebas a propósito)
  * @param {(msg: string) => void} [opts.onProgress]
  */
 export async function ejecutarPipeline(opts = {}) {
@@ -811,6 +829,8 @@ export async function ejecutarPipeline(opts = {}) {
     // queda en el bucket hasta que n8n confirma que se publicó en todas las
     // redes (ahí se llama a /api/publicado-y-limpiar, que sí los borra).
     borrarAnteriores = false,
+    // Salta el candado anti-duplicados. Solo para pruebas manuales a propósito.
+    forzar = false,
     onProgress = () => {},
   } = opts;
 
@@ -849,8 +869,15 @@ export async function ejecutarPipeline(opts = {}) {
     };
   }
 
+  // ── Candado anti-duplicados ────────────────────────────────────────────────
+  // Va ANTES de la cola: si n8n dispara dos veces la misma pasada (le pasó el
+  // 20-oct a las 8:00), la segunda petición se rechaza aquí aunque caiga en otra
+  // instancia de Cloud Run, porque el candado vive en el bucket y no en memoria.
+  // Ver src/services/pipelineCandado.js.
+  const reserva = await reservarPasada({ jobId, forzar });
+
   // ── El render va con turno: uno a la vez, con cola corta ──────────────────
-  return conTurno(async () => {
+  return conCandado(reserva, () => conTurno(async () => {
     const tiempos = {};
     const marcar = (nombre, desde) => {
       tiempos[nombre] = Math.round((Date.now() - desde) / 1000);
@@ -1192,5 +1219,5 @@ export async function ejecutarPipeline(opts = {}) {
     }
 
     return { ...salida, jobId, reutilizado: false };
-  });
+  }));
 }

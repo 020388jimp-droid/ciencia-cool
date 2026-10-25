@@ -53,6 +53,7 @@ curl -X POST "https://TU-SERVICIO.run.app/api/pipeline-completo" \
 | `watermarkOpacity` | `0.40` | Opacidad de la marca de agua |
 | `jobId` | — | Si se repite el mismo, **devuelve el resultado anterior en vez de generar otro video**. Evita duplicados cuando n8n reintenta |
 | `dryRun` | `false` | Con `true` no genera nada: solo valida y devuelve el plan. Ideal para probar la configuración de n8n sin gastar cuota |
+| `forzar` | `false` | Ignora el candado anti-duplicados. Solo para pruebas manuales a propósito |
 
 ### Respuesta
 
@@ -88,6 +89,7 @@ descargar el archivo como Instagram para ir a buscarlo al processing.
 |---|---|---|
 | `200` | Todo correcto | Publicar el video |
 | `401` | Falta o es incorrecta la clave | Revisar `X-Pipeline-Key` |
+| `409` | Candado anti-duplicados: ya hay una pasada en curso o un video recién hecho | **No reintentar**: n8n ya está publicando (o acaba de publicar) ese video |
 | `429` | Ya hay una generación en marcha y la cola está llena | Esperar lo que indique `Retry-After` (120 s) y reintentar |
 | `500` | Falló la generación | Mirar `steps` para ver en qué paso se rompió |
 | `503` | El servidor no tiene `PIPELINE_KEY` configurada | Revisar las variables de entorno del servicio |
@@ -106,8 +108,17 @@ descargar el archivo como Instagram para ir a buscarlo al processing.
   vez en almacenamiento y el coste es de céntimos al año.
 - **Cloud Run corta respuestas de más de 32 MB.** El render ya limita el archivo a
   20 MB de presupuesto para que siempre quepa.
+- **Candado anti-duplicados.** El 20-oct n8n disparó la pasada de las 8:00 dos
+  veces (08:01 y 08:04) y se publicaron dos videos del mismo tema. Ahora el
+  pipeline anota en `estado/pipeline-candado.json` (en el bucket) qué pasada está
+  en curso y cuál fue la última que terminó bien. Antes de generar pregunta: si
+  hay una **en curso** (empezada hace menos de 30 min) o una que **terminó bien
+  hace menos de 120 min**, responde `409` y n8n no sube nada. Si una pasada
+  falla, el candado se libera y se puede reintentar de inmediato. Los minutos de
+  espera se cambian con la variable `PIPELINE_COOLDOWN_MIN`.
 - **`GET /api/pipeline-completo/status`** dice si la clave vale, si el servidor
-  está ocupado y cuántos videos hay en disco, sin generar nada.
+  está ocupado, qué dice el candado y cuántos videos hay en disco, sin generar
+  nada.
 
 ## 🤖 n8n: orquestador de publicación (VM en Google Cloud)
 

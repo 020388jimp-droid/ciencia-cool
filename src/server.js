@@ -16,6 +16,7 @@ import { generateAudioForScript, AVAILABLE_VOICES, DEFAULT_VOICE_ID } from './se
 import { findMediaForScenes } from './services/mediaService.js';
 import { renderFinalVideo, buildRenderScenes } from './services/videoRenderService.js';
 import { ejecutarPipeline, estadoPipeline, limpiarVideosPublicados, registrarPublicacion } from './services/pipelineService.js';
+import { leerCandado, evaluarCandado } from './services/pipelineCandado.js';
 import { verificarCuentaInstagram } from './services/instagramService.js';
 import { estadoTokenInstagram } from './services/instagramToken.js';
 import { pendientesTikTok, registrarTextosTikTok, horariosTikTok } from './services/tiktokTextos.js';
@@ -378,7 +379,7 @@ app.post('/api/pipeline-completo', async (req, res) => {
     const {
       categoria, topic, voiceId, format,
       brandingMode, watermarkPos, watermarkOpacity,
-      jobId, dryRun, borrarAnteriores,
+      jobId, dryRun, borrarAnteriores, forzar,
     } = req.body || {};
 
     const etiqueta = jobId ? ` · job ${jobId}` : '';
@@ -390,6 +391,7 @@ app.post('/api/pipeline-completo', async (req, res) => {
       jobId: jobId || null,
       dryRun: dryRun === true,
       borrarAnteriores: borrarAnteriores === true,
+      forzar: forzar === true,
       onProgress: (msg) => {
         pasos.push(msg);
         console.log(`   ${msg}`);
@@ -425,6 +427,21 @@ app.post('/api/pipeline-completo', async (req, res) => {
     });
   } catch (error) {
     const segundos = Math.round((Date.now() - t0) / 1000);
+
+    // 409: candado anti-duplicados. n8n disparó la misma pasada dos veces (o
+    // reintentó después de un timeout) y ya hay una generación en marcha o un
+    // video recién hecho. NO es un fallo del pipeline: es la protección para no
+    // publicar el mismo tema dos veces. Al recibir 409, el nodo HTTP de n8n se
+    // detiene y no sube nada a las redes.
+    if (error.codigo === 'PIPELINE_DUPLICADO') {
+      console.warn(`🔒 Pipeline rechazado por el candado: ${error.message}`);
+      return res.status(409).json({
+        success: false,
+        duplicado: true,
+        error: error.message,
+        candado: error.detalle || null,
+      });
+    }
 
     // 429: ya hay una generación en marcha y la cola está llena. No es un
     // fallo del pipeline, es que hay que esperar. n8n debe reintentar.
@@ -494,17 +511,24 @@ app.post('/api/publicado-y-limpiar', async (req, res) => {
 // API: Estado del pipeline. No genera nada.
 // Sirve para que n8n valide su configuración al arrancar y para saber si el
 // servidor está ocupado antes de lanzar una generación.
-app.get('/api/pipeline-completo/status', (req, res) => {
+app.get('/api/pipeline-completo/status', async (req, res) => {
   const configurada = Boolean(PIPELINE_KEY);
   const autorizada = claveValida(req.get('X-Pipeline-Key'));
   const ocupado = estadoPipeline();
+  // Candado persistente (bucket): dice si hay una pasada en curso o si la
+  // última terminó hace poco. Es lo que frena los disparos duplicados de n8n.
+  const candado = await leerCandado();
+  const bloqueo = evaluarCandado(candado);
 
   res.json({
     success: true,
     pipelineKeyConfigured: configurada,
     authorized: autorizada,
     ocupado,
-    listo: autorizada && ocupado.enCurso === 0 && ocupado.enCola === 0,
+    candado,
+    puedeGenerar: !bloqueo,
+    motivoBloqueo: bloqueo ? bloqueo.mensaje : null,
+    listo: autorizada && ocupado.enCurso === 0 && ocupado.enCola === 0 && !bloqueo,
     videosEnDisco: (() => {
       const dir = path.join(projectRoot, 'outputs', 'video');
       try {

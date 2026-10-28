@@ -38,3 +38,6 @@ outputs/tiktok.txt
 
 # Archivos temporales de pruebas
 outputs/_*
+
+# Caché de estado generada en ejecución
+outputs/*.json
